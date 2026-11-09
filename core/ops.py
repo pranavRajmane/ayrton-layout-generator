@@ -12,16 +12,17 @@ def _moved_frame(fd: dict, delta: np.ndarray) -> dict:
     return Frame.from_dict(fd).transformed(delta).to_dict()
 
 
-def set_part_transform(doc, new_t: dict) -> list[dict]:
+def set_part_transform(doc, new_t: dict, anchors: bool = True) -> list[dict]:
     """Patch that gives the part a new transform and carries everything fixed to
-    it (picked gate faces, element anchors) along by the same rigid move."""
+    it (picked gate faces, and with anchors the element anchors) along by the same
+    rigid move.  The guided set-up passes anchors=False: its sprue stands in the box."""
     data = doc.data
     old = orient.to_matrix((data["part"] or {}).get("transform"))
     delta = orient.to_matrix(new_t) @ np.linalg.inv(old)
     ops = [{"op": "add", "path": "/part/transform", "value": new_t}]
     for i, p in enumerate(data["part"].get("ports", [])):
         ops.append({"op": "replace", "path": f"/part/ports/{i}/frame", "value": _moved_frame(p["frame"], delta)})
-    for i, e in enumerate(data["elements"]):
+    for i, e in enumerate(data["elements"] if anchors else []):
         if e.get("anchor"):
             ops.append({"op": "replace", "path": f"/elements/{i}/anchor/frame",
                         "value": _moved_frame(e["anchor"]["frame"], delta)})

@@ -178,3 +178,12 @@ Architectural choices and why, newest last.  Foundry numbers are never decided h
     off. In step 1's plan view parts are dragged by their footprint and snap (centre or edge) to the other
     parts' centres and edges and the box's walls and centre lines; green lines show where parts already
     line up. Parts are best placed before gating: a gate does not follow its part.
+46. **Autosave** (user, 2026-11-09): every change (and every undo/redo) saves the design to its file:
+    the design file it was opened from, or `<part>.gating.json` beside a part file. Opening a part whose
+    `.gating.json` exists opens that design again ("Start over" begins a new one and replaces it). The
+    undo history lives in the session only.
+47. **Ingates follow their part**: a runner keeps the points it was drawn with and its ingate size
+    (`drawn`, `gate_*`); after a part is moved, turned, centred or fitted, every gated runner is cut and gated
+    again from them against the part where it now is, in the same undo step as the move. Ingates drawn
+    by hand that end on the moved part's footprint move their end with it. Part moves in the guided set-up
+    no longer carry element anchors along: the sprue stands in the box.

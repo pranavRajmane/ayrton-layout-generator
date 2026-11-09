@@ -110,6 +110,14 @@ class DesignDocument:
         self._redo.clear()
         self._data = new
 
+    def merge_last(self) -> None:
+        """The last two changes become one undo step (a change and what it brought about)."""
+        if len(self._undo) < 2:
+            return
+        f2, i2 = self._undo.pop()
+        f1, i1 = self._undo.pop()
+        self._undo.append((f1 + f2, i2 + i1))
+
     def undo(self) -> bool:
         if not self._undo:
             return False

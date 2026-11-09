@@ -24,6 +24,13 @@ class Runner(PathElement):
         Param("waypoints", unit="mm", default=((0.0, 0.0, 0.0), (200.0, 0.0, 0.0)), kind="points",
               description="the points the runner runs through on the parting plane, after its start"),
         Param("bend_radius", unit="mm", default=0.0, min=0.0, max=1000.0),
+        # how it was drawn, and the ingate put where it runs into a part: kept so it can be cut and
+        # gated again when a part moves (waypoints are the cut-back runner)
+        Param("drawn", unit="mm", default=(), kind="points", description="the points as drawn, before the cut"),
+        Param("gate_width", unit="mm", default=0.0, min=0.0, max=500.0),
+        Param("gate_thickness", unit="mm", default=0.0, min=0.0, max=200.0),
+        Param("gate_length", unit="mm", default=0.0, min=0.0, max=1000.0),
+        Param("gate_side", choices=("drag", "cope"), default="drag"),
     ]
 
     def section(self, p):

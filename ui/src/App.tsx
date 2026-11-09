@@ -156,6 +156,8 @@ export default function App() {
 
   const [plan, setPlan] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  const [dismissed, setDismissed] = useState(false);
+  useEffect(() => setDismissed(false), [state?.id]);
   const [dragging, setDragging] = useState(false);
   // a part file from the computer: upload it, then start a new design around it
   const openFile = (f: File) =>
@@ -226,7 +228,6 @@ export default function App() {
         <span className="sep" />
         <button disabled={!state?.can_undo || busy} onClick={() => state && run(() => api.undo(state.id))}>Undo</button>
         <button disabled={!state?.can_redo || busy} onClick={() => state && run(() => api.redo(state.id))}>Redo</button>
-        <button disabled={!state || busy} onClick={() => state && run(async () => setNote("saved " + (await api.save(state.id)).saved))}>Save</button>
         <button
           disabled={!state || busy}
           onClick={() => {
@@ -237,10 +238,27 @@ export default function App() {
           Export to Ayrton
         </button>
         <span className="grow" />
-        {state && <span className="muted">regenerated in {state.timings_ms.regen_and_mesh?.toFixed(0)} ms</span>}
+        {state && (
+          <span className={state.save_error ? "bad" : "muted"} title={state.path ?? ""}>
+            {state.save_error ? "not saved" : state.saved ? `saved ${state.saved}` : state.path ? "saves as you go" : ""}
+          </span>
+        )}
         {busy && <span className="busy">working…</span>}
       </header>
       {error && <div className="error">{error}</div>}
+      {state?.save_error && <div className="error">{state.save_error}</div>}
+      {state?.resumed && !dismissed && (
+        <div className="note">
+          Opened your saved design ({state.path?.split("/").pop()}).{" "}
+          <button className="link" onClick={() => {
+            const part = state.path!.replace(/\.gating\.json$/, "");
+            const src = (state.document.part?.source as string) ?? "";
+            const file = src.startsWith("/") ? src : `${part.slice(0, part.lastIndexOf("/") + 1)}${src}`;
+            if (confirm("Start over from the part? The saved design is replaced.")) run(() => api.newFromPart(file, true));
+          }}>Start over</button>{" "}
+          <button className="link" onClick={() => setDismissed(true)}>OK</button>
+        </div>
+      )}
       {note && <div className="note" onClick={() => setNote(null)}>{note}</div>}
       <aside className="tree">
         <h3>{state?.document.name ?? "No design"}</h3>

@@ -75,15 +75,37 @@ def _cavity(data: dict, cid: str) -> tuple[int, dict]:
     raise WorkflowError(f"no part '{cid}' in the box")
 
 
-def _move_part(doc, d: np.ndarray, cavity: str | None) -> list[dict]:
-    """Patch for the world move d (4x4, rigid) of one part in the box; every other part stays put."""
+def _move_part(doc, d: np.ndarray, cavity: str | None, follow=None) -> list[dict]:
+    """Patch for the world move d (4x4, rigid) of one part in the box; every other part stays put.
+    follow: the part's footprint before the move ((xmin, ymin), (xmax, ymax)): ingates drawn by hand
+    that end on it move their end with it (automatic ones are placed again from their runners)."""
+    data = doc.data
+    ops = _follow(data, d, follow) if follow is not None else []
+    return ops + _move_only(doc, d, cavity)
+
+
+def _follow(data: dict, d: np.ndarray, foot) -> list[dict]:
+    (x0, y0), (x1, y1) = foot
+    out = []
+    for i, e in enumerate(data["elements"]):
+        if e["type"] != "ingate" or e["params"].get("placed") == "auto":
+            continue
+        end = e["params"]["waypoints"][-1]
+        if x0 - 2 <= end[0] <= x1 + 2 and y0 - 2 <= end[1] <= y1 + 2:
+            moved = (d @ np.array([end[0], end[1], end[2] if len(end) > 2 else 0.0, 1.0]))[:3]
+            out.append({"op": "replace", "path": f"/elements/{i}/params/waypoints/{len(e['params']['waypoints']) - 1}",
+                        "value": [float(moved[0]), float(moved[1]), 0.0]})
+    return out
+
+
+def _move_only(doc, d: np.ndarray, cavity: str | None) -> list[dict]:
     data = doc.data
     if cavity is not None:
         i, c = _cavity(data, cavity)
         return [{"op": "replace", "path": f"/part/cavities/{i}/transform",
                  "value": orient.to_dict(d @ orient.to_matrix(c["transform"]))}]
     m = orient.to_matrix((data["part"] or {}).get("transform"))
-    ops = set_part_transform(doc, orient.to_dict(d @ m))
+    ops = set_part_transform(doc, orient.to_dict(d @ m), anchors=False)     # the sprue stays in the box
     inv = np.linalg.inv(d)
     for i, c in enumerate(data["part"].get("cavities", [])):
         if not c.get("source"):                   # a copy is placed relative to the part: hold it where it is
@@ -92,26 +114,30 @@ def _move_part(doc, d: np.ndarray, cavity: str | None) -> list[dict]:
     return ops
 
 
-def move_part_patch(doc, delta, cavity: str | None = None) -> list[dict]:
+def _foot(bbox):
+    return None if bbox is None else ((bbox[0][0], bbox[0][1]), (bbox[1][0], bbox[1][1]))
+
+
+def move_part_patch(doc, delta, cavity: str | None = None, bbox=None) -> list[dict]:
     d = np.eye(4)
     d[:3, 3] = np.asarray(delta, float)
-    return _move_part(doc, d, cavity)
+    return _move_part(doc, d, cavity, _foot(bbox))
 
 
-def turn_part_patch(doc, axis, angle_deg: float, centre, cavity: str | None = None) -> list[dict]:
+def turn_part_patch(doc, axis, angle_deg: float, centre, cavity: str | None = None, bbox=None) -> list[dict]:
     """Turn one part about an axis through its own centre."""
     r = orient.rotation(axis, angle_deg)
     c = np.asarray(centre, float)
     d = np.eye(4)
     d[:3, :3], d[:3, 3] = r, c - r @ c
-    return _move_part(doc, d, cavity)
+    return _move_part(doc, d, cavity, _foot(bbox))
 
 
 def centre_part_patch(doc, part_bbox, cavity: str | None = None) -> list[dict]:
     """Move a part so its bounding box is centred on the box axis, half above and
     half below the parting plane."""
     lo, hi = np.asarray(part_bbox[0], float), np.asarray(part_bbox[1], float)
-    return move_part_patch(doc, -(lo + hi) / 2, cavity)
+    return move_part_patch(doc, -(lo + hi) / 2, cavity, part_bbox)
 
 
 def add_copy_patch(doc, of: str | None, offset) -> list[dict]:
@@ -299,6 +325,7 @@ def runner_patch(doc, side: str, w_parting: float, w_far: float, height: float, 
     if len(pts) < (2 if branched else 1):
         raise WorkflowError("the runner needs at least one point after its start")
 
+    drawn = [list(p) for p in pts]                            # as drawn: kept to cut and gate again later
     gate_el = None
     if gate is not None and outline:
         if min(float(gate[k]) for k in ("width", "thickness", "length")) <= 0 or gate.get("side") not in ("drag", "cope"):
@@ -313,7 +340,11 @@ def runner_patch(doc, side: str, w_parting: float, w_far: float, height: float, 
                        "waypoints": [S, P], "placed": "auto"}
 
     params = {"side": side, "w_parting": float(w_parting), "w_far": float(w_far), "height": float(height),
-              "waypoints": pts}
+              "waypoints": pts, "drawn": drawn,
+              "gate_width": float(gate["width"]) if gate else 0.0,
+              "gate_thickness": float(gate["thickness"]) if gate else 0.0,
+              "gate_length": float(gate["length"]) if gate else 0.0,
+              "gate_side": gate["side"] if gate else "drag"}
     ids = {e["id"] for e in data["elements"]}
     cids = {c["id"] for c in data["connections"]}
     ops: list[dict] = []
@@ -364,6 +395,27 @@ def runner_patch(doc, side: str, w_parting: float, w_far: float, height: float, 
                  "value": {"id": next_id(cids | {tee}, "gate"), "from": {"instance": gid, "port": "outlet"},
                            "to": {"instance": "part", "port": "gate"}, "joint": "gate"}}]
     return ops
+
+
+def regate_patch(doc, outline_for) -> list[dict]:
+    """Every runner drawn with an ingate is cut and gated again from its drawn points against the
+    part as it is now (after a part moved). outline_for(runner params) gives the part's outline to
+    meet. One patch; a runner whose run into the part has become too short is left as it was."""
+    from core.document import DesignDocument
+    scratch = DesignDocument(copy.deepcopy(doc.data), base_dir=doc.base_dir)
+    for rid in runners(doc.data):
+        p = scratch.data["elements"][_index(scratch.data, rid)]["params"]
+        if not p.get("drawn") or not p.get("gate_length"):
+            continue
+        gate = {"width": p["gate_width"], "thickness": p["gate_thickness"], "length": p["gate_length"],
+                "side": p.get("gate_side", "drag")}
+        try:
+            ops = runner_patch(scratch, p["side"], p["w_parting"], p["w_far"], p["height"], p["drawn"], rid,
+                               gate=gate, outline=outline_for(p))
+            scratch.apply(ops)
+        except WorkflowError:
+            continue
+    return jsonpatch.make_patch(doc.data, scratch.data).patch
 
 
 def _fed_by(data: dict, inst: str) -> set[str]:

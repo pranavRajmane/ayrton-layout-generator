@@ -44,6 +44,9 @@ class Session:
     outline: tuple[str, list] = ("", [])                                 # (part mesh key, parting-plane outline)
     suggestions: tuple[str, list] = ("", [])                             # (part mesh key, fit.suggest)
     sections: dict = field(default_factory=dict)                          # (part mesh key, z) -> outline
+    saved: str | None = None                                              # when it was last saved (autosave)
+    save_error: str | None = None
+    resumed: bool = False                                                 # opened from its saved design
     regen_ms: float = 0.0
 
 
@@ -135,6 +138,18 @@ def _outline(s: Session) -> list:
     return s.outline[1]
 
 
+def _changed(s: Session) -> None:
+    """After every change: regenerate, then save the design to its file (when it has one)."""
+    _regenerate(s)
+    if s.path is None:
+        return
+    try:
+        s.doc.save(s.path)
+        s.saved, s.save_error = time.strftime("%H:%M:%S"), None
+    except OSError as e:
+        s.save_error = f"could not save {s.path}: {e.strerror or e}"
+
+
 def _state(sid: str) -> dict:
     s = _session(sid)
     res = s.result
@@ -154,6 +169,7 @@ def _state(sid: str) -> dict:
             "shrinkage_pct": res.part.shrinkage_pct,
             "ports": {k: f.to_dict() for k, f in res.part.ports.items()}},
         "preset": res.preset.data if res.preset else None,
+        "saved": s.saved, "save_error": s.save_error, "resumed": s.resumed,
         "box": workflow.box(s.doc.data),
         "parts": _parts(s),
         "parting_outline": _outline(s),
@@ -210,18 +226,27 @@ async def upload(request: Request, name: str) -> dict:
 
 
 @app.post("/api/designs/new")
-def new_design(part: str = Body(..., embed=True)) -> dict:
-    """A new design around a part file (STEP or STL); saved next to it as <name>.gating.json."""
+def new_design(part: str = Body(...), fresh: bool = Body(False)) -> dict:
+    """A design around a part file (STEP or STL), saved next to it as <name>.gating.json after every
+    change. If that file is already there, the saved design is opened again (fresh: start over)."""
     p = Path(part).expanduser().resolve()
     if not p.is_file():
         raise HTTPException(404, f"no file {p}")
     if p.suffix.lower() not in (".step", ".stp", ".stl"):
         raise HTTPException(422, f"{p.name}: a part is a STEP or STL file")
+    target = p.with_name(f"{p.stem}.gating.json")
+    sid = uuid.uuid4().hex[:12]
+    if target.exists() and not fresh:
+        try:
+            SESSIONS[sid] = Session(DesignDocument.load(target), target, resumed=True)
+            _regenerate(SESSIONS[sid])
+            return _state(sid)
+        except (DocumentError, ValueError, KeyError):
+            pass                                          # not a design we can read: start a new one
     data = empty(p.stem)
     data["part"] = {"source": p.name}
-    sid = uuid.uuid4().hex[:12]
-    SESSIONS[sid] = Session(DesignDocument(data, base_dir=p.parent), p.with_name(f"{p.stem}.gating.json"))
-    _regenerate(SESSIONS[sid])
+    SESSIONS[sid] = Session(DesignDocument(data, base_dir=p.parent), target)
+    _changed(SESSIONS[sid]) if fresh else _regenerate(SESSIONS[sid])
     return _state(sid)
 
 
@@ -239,7 +264,7 @@ def patch(sid: str, ops: list[dict] = Body(...)) -> dict:
         raise HTTPException(422, e.problems) from None
     except Exception as e:                                 # a malformed JSON Patch
         raise HTTPException(422, [f"{type(e).__name__}: {e}"]) from None
-    _regenerate(s)
+    _changed(s)
     return _state(sid)
 
 
@@ -247,7 +272,7 @@ def patch(sid: str, ops: list[dict] = Body(...)) -> dict:
 def undo(sid: str) -> dict:
     s = _session(sid)
     if s.doc.undo():
-        _regenerate(s)
+        _changed(s)
     return _state(sid)
 
 
@@ -255,7 +280,7 @@ def undo(sid: str) -> dict:
 def redo(sid: str) -> dict:
     s = _session(sid)
     if s.doc.redo():
-        _regenerate(s)
+        _changed(s)
     return _state(sid)
 
 
@@ -293,7 +318,7 @@ def _apply(s: Session, patch: list[dict]) -> None:
         s.doc.apply(workflow.with_sync(s.doc, patch))
     except DocumentError as e:
         raise HTTPException(422, e.problems) from None
-    _regenerate(s)
+    _changed(s)
 
 
 def _part(s: Session):
@@ -443,14 +468,16 @@ def centre_part(sid: str, cavity: str | None = Body(None, embed=True)) -> dict:
     s = _session(sid)
     bb = _part_entry(s, cavity)["bbox"]
     _workflow(s, lambda: workflow.centre_part_patch(s.doc, bb, cavity))
+    _regate(s)
     return _state(sid)
 
 
 @app.post("/api/designs/{sid}/workflow/move_part")
 def move_part(sid: str, delta: list[float] = Body(...), cavity: str | None = Body(None)) -> dict:
     s = _session(sid)
-    _part_entry(s, cavity)
-    _workflow(s, lambda: workflow.move_part_patch(s.doc, delta, cavity))
+    bb = _part_entry(s, cavity)["bbox"]
+    _workflow(s, lambda: workflow.move_part_patch(s.doc, delta, cavity, bb))
+    _regate(s)
     return _state(sid)
 
 
@@ -459,7 +486,8 @@ def turn_part(sid: str, axis: str = Body(...), angle_deg: float = Body(...), cav
     s = _session(sid)
     lo, hi = _part_entry(s, cavity)["bbox"]
     centre = [(a + b) / 2 for a, b in zip(lo, hi)]
-    _workflow(s, lambda: workflow.turn_part_patch(s.doc, axis, angle_deg, centre, cavity))
+    _workflow(s, lambda: workflow.turn_part_patch(s.doc, axis, angle_deg, centre, cavity, [lo, hi]))
+    _regate(s)
     return _state(sid)
 
 
@@ -515,21 +543,36 @@ def draw_runner(sid: str, side: str = Body(...), w_parting: float = Body(...), w
     """Redraw a runner, or (runner null) draw a new one from the sprue or (branch {from, at}) off
     another runner; with gate {width, thickness, length, side} an ingate goes where it meets the part."""
     s = _session(sid)
-    outline = None
-    if gate and s.result and s.result.part:
-        # where the runner first touches the part: the part's outline through the runner's depth (and the
-        # ingate's), not only on the parting plane: the part may reach further out below or above it
-        def levels(sign: float, depth: float) -> set[float]:     # ~every twelfth of the depth, ends just inside
-            n = 12
-            return {sign * min(max(depth * k / n, 1e-3), depth - 1e-3) for k in range(n + 1)}
-        zs = levels(1.0 if side == "cope" else -1.0, height)
-        t = float(gate.get("thickness") or 0)
-        if t > 0:
-            zs |= levels(1.0 if gate.get("side") == "cope" else -1.0, t)
-        outline = _outline(s) + [line for z in sorted(zs) for line in _section_at(s, z)]
+    outline = _runner_outline(s, side, height, gate) if gate else None
     _workflow(s, lambda: workflow.runner_patch(s.doc, side, w_parting, w_far, height, points, runner,
                                                branch, gate, outline))
     return _state(sid)
+
+
+def _runner_outline(s: Session, side: str, height: float, gate: dict | None) -> list | None:
+    """Where a runner first touches the part: the part's outline through the runner's depth (and the
+    ingate's), not only on the parting plane: the part may reach further out below or above it."""
+    if not (s.result and s.result.part):
+        return None
+
+    def levels(sign: float, depth: float) -> set[float]:        # ~every twelfth of the depth, ends just inside
+        n = 12
+        return {sign * min(max(depth * k / n, 1e-3), depth - 1e-3) for k in range(n + 1)}
+    zs = levels(1.0 if side == "cope" else -1.0, float(height))
+    t = float((gate or {}).get("thickness") or 0)
+    if t > 0:
+        zs |= levels(1.0 if gate.get("side") == "cope" else -1.0, t)
+    return _outline(s) + [line for z in sorted(zs) for line in _section_at(s, z)]
+
+
+def _regate(s: Session) -> None:
+    """After a part moved: the gated runners are cut and gated again against it, in the same undo step."""
+    patch = workflow.regate_patch(s.doc, lambda p: _runner_outline(
+        s, p["side"], p["height"], {"thickness": p["gate_thickness"], "side": p.get("gate_side", "drag")}))
+    if patch:
+        s.doc.apply(patch)
+        s.doc.merge_last()
+        _changed(s)
 
 
 def _section_at(s: Session, z: float) -> list:
@@ -596,6 +639,7 @@ def apply_fit(sid: str, move: list[list[float]] = Body(...), length: float = Bod
     s = _session(sid)
     _part(s)
     _workflow(s, lambda: workflow.fit_patch(s.doc, move, length, width, height, parting, shift))
+    _regate(s)
     return _state(sid)
 
 

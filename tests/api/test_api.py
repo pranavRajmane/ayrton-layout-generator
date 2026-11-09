@@ -10,8 +10,17 @@ client = TestClient(app)
 PLATE = Path(__file__).resolve().parents[1] / "reference_parts" / "plate" / "design.json"
 
 
+@pytest.fixture(autouse=True)
+def plate_copy(tmp_path, monkeypatch):
+    """Designs save themselves after every change: tests edit a copy, never the reference part."""
+    import shutil
+    d = tmp_path / "plate"
+    shutil.copytree(PLATE.parent, d)
+    monkeypatch.setitem(globals(), "PLATE_COPY", d / "design.json")
+
+
 def open_plate():
-    r = client.post("/api/designs/open", json={"path": str(PLATE)})
+    r = client.post("/api/designs/open", json={"path": str(globals()["PLATE_COPY"])})
     assert r.status_code == 200, r.text
     return r.json()
 
@@ -121,8 +130,10 @@ def test_mirror_endpoint():
     assert {e["instance"] for e in st["elements"]} == {"sprue_1", "sprue_1_m"}
 
 
-def test_guided_setup_from_a_part_file():
-    st = client.post("/api/designs/new", json={"part": str(PLATE.with_name("plate.step"))}).json()
+def test_guided_setup_from_a_part_file(tmp_path):
+    import shutil
+    part = shutil.copy(PLATE.with_name("plate.step"), tmp_path / "plate.step")       # autosave writes beside it
+    st = client.post("/api/designs/new", json={"part": str(part)}).json()
     sid = st["id"]
     assert st["box"] is None and st["path"].endswith("plate.gating.json")
     st = client.post(f"/api/designs/{sid}/workflow/box",
@@ -180,3 +191,46 @@ def test_runner_gated_where_the_part_reaches_out_below_the_plane(tmp_path):
                            "gate": {"width": 40, "thickness": 8, "length": 20, "side": "drag"}}).json()
     g = next(e for e in st["document"]["elements"] if e["type"] == "ingate")
     assert g["params"]["waypoints"][1][0] == pytest.approx(-80, abs=0.01)      # the step's edge, not the plate's (-50)
+
+
+def test_autosave_and_reopen(tmp_path):
+    import json, shutil
+    part = shutil.copy(PLATE.with_name("plate.step"), tmp_path / "plate.step")
+    st = client.post("/api/designs/new", json={"part": str(part)}).json()
+    saved = tmp_path / "plate.gating.json"
+    assert not saved.exists() and st["saved"] is None                       # nothing changed yet
+    st = client.post(f"/api/designs/{st['id']}/workflow/box",
+                     json={"length": 400, "width": 300, "height": 200, "parting": 100}).json()
+    assert saved.exists() and st["saved"] and json.loads(saved.read_text())["mold"]["flask"]["size_mm"] == [400, 300, 200]
+    st = client.post(f"/api/designs/{st['id']}/undo").json()                 # undo is saved too
+    assert json.loads(saved.read_text())["mold"]["flask"] is None
+    st = client.post(f"/api/designs/{st['id']}/redo").json()
+    again = client.post("/api/designs/new", json={"part": str(part)}).json()  # the same part: its design comes back
+    assert again["resumed"] and again["box"]["size"] == [400, 300, 200]
+    fresh = client.post("/api/designs/new", json={"part": str(part), "fresh": True}).json()
+    assert not fresh["resumed"] and fresh["box"] is None and json.loads(saved.read_text())["mold"]["flask"] is None
+
+
+def test_ingates_follow_their_part(tmp_path):
+    """A gated runner into the plate; the plate moves 30 mm along the runner: the runner is cut and gated
+    again where it now meets the plate. The sprue stays where it is."""
+    import shutil
+    part = shutil.copy(PLATE.with_name("plate.step"), tmp_path / "plate.step")
+    sid = client.post("/api/designs/new", json={"part": str(part)}).json()["id"]
+    client.post(f"/api/designs/{sid}/workflow/box", json={"length": 600, "width": 400, "height": 300, "parting": 150})
+    client.post(f"/api/designs/{sid}/workflow/sprue", json={"x": -250, "y": 0, "d_top": 30, "d_bottom": 24})
+    gate = {"width": 40, "thickness": 8, "length": 20, "side": "drag"}
+    st = client.post(f"/api/designs/{sid}/workflow/runner",
+                     json={"side": "drag", "w_parting": 30, "w_far": 20, "height": 25, "points": [[0, 0, 0]],
+                           "gate": gate}).json()
+    g = next(e for e in st["document"]["elements"] if e["type"] == "ingate")["params"]["waypoints"]
+    assert g[1][0] == pytest.approx(-100, abs=0.01)                          # the plate's left edge
+    st = client.post(f"/api/designs/{sid}/workflow/move_part", json={"delta": [30, 0, 0]}).json()
+    g = next(e for e in st["document"]["elements"] if e["type"] == "ingate")["params"]["waypoints"]
+    assert g[1][0] == pytest.approx(-70, abs=0.01) and g[0][0] == pytest.approx(-90, abs=0.01)
+    sprue = next(e for e in st["document"]["elements"] if e["id"] == "sprue")
+    assert sprue["anchor"]["frame"]["origin"][0] == -250
+    assert not [i for i in st["issues"] if i["severity"] == "error"]
+    st = client.post(f"/api/designs/{sid}/undo").json()                      # the move and the re-gating: one step
+    g = next(e for e in st["document"]["elements"] if e["type"] == "ingate")["params"]["waypoints"]
+    assert g[1][0] == pytest.approx(-100, abs=0.01)

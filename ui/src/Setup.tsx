@@ -72,7 +72,9 @@ export function useSetup(state: DesignState | null, run: Run, setPlan: (plan: bo
   /** where a runner starts (under the sprue, or its branch point) and its points after that */
   const geo = (id: string): { start: XY; pts: XY[]; branched: boolean; width: number; from: string | null } => {
     const r = el(state!, id);
-    const wp = (r.params.waypoints as number[][]).map(xy);
+    // edited as drawn (a gated runner is stored cut back; it is cut again from these)
+    const drawn = (r.params.drawn as number[][] | undefined) ?? [];
+    const wp = (drawn.length ? drawn : (r.params.waypoints as number[][])).map(xy);
     const feed = (state!.document.connections as any[]).find((c) => c.to.instance === id && (c.joint === "drop" || c.joint === "tee"));
     const branched = feed?.joint === "tee";
     const s0 = el(state!, "sprue")?.anchor.frame.origin ?? [0, 0];

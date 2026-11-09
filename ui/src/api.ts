@@ -36,6 +36,7 @@ export type DesignState = {
   flask: [Vec3, Vec3] | null;
   box: { size: Vec3; parting: number; bottom: number; top: number; centre: Vec3 } | null;
   parts: PartInBox[];
+  saved: string | null; save_error: string | null; resumed: boolean;
   parting_outline: [number, number][][];
 };
 export type PartInBox = { id: string; name: string; kind: "main" | "copy" | "file"; bbox: [Vec3, Vec3]; volume_mm3: number | null };
@@ -75,7 +76,7 @@ export const api = {
   upload,
   elementTypes: () => call<ElementType[]>("GET", "/api/elements"),
   open: (path: string) => call<DesignState>("POST", "/api/designs/open", { path }),
-  newFromPart: (part: string) => call<DesignState>("POST", "/api/designs/new", { part }),
+  newFromPart: (part: string, fresh = false) => call<DesignState>("POST", "/api/designs/new", { part, fresh }),
   setBox: (id: string, b: { length: number; width: number; height: number; parting: number }) =>
     call<DesignState>("POST", `/api/designs/${id}/workflow/box`, b),
   suggestFit: (id: string) => call<{ options: FitOption[] }>("POST", `/api/designs/${id}/workflow/suggest`),
