@@ -655,3 +655,36 @@ function Lined({ box, parts }: { box: Box; parts: PartFoot[] }) {
     </>
   );
 }
+
+// ---- feeders and vents: clicked into place in plan view -----------------------------------------
+
+/** A ghost circle of diameter d follows the cursor (lined up like everything else); a click places it. */
+export function PlaceSketch({ box, d, onPlace, onCursor, guides }: {
+  box: Box; d: number; onPlace: (p: XY) => void; onCursor: (p: XY | null) => void; guides?: Guides;
+}) {
+  const mmPerPx = useMmPerPx();
+  const [L, W] = box.size;
+  const [at, setAt] = useState<{ p: XY; gx: number | null; gy: number | null } | null>(null);
+  return (
+    <>
+      <mesh position={[0, 0, box.top + 1]}
+        onPointerMove={(e) => {
+          const a = align([e.point.x, e.point.y], null, e.nativeEvent.altKey, guides, mmPerPx);
+          setAt(a);
+          onCursor(a.p);
+        }}
+        onPointerOut={() => { setAt(null); onCursor(null); }}
+        onClick={(e) => { if (e.delta <= 4 && at) onPlace(at.p); }}>
+        <planeGeometry args={[L, W]} />
+        <meshBasicMaterial transparent opacity={0} depthWrite={false} />
+      </mesh>
+      {at && d > 0 && (
+        <mesh raycast={() => null} position={[at.p[0], at.p[1], box.top + 2]} renderOrder={6}>
+          <ringGeometry args={[Math.max(d / 2 - 2, 0.5), d / 2, 40]} />
+          <meshBasicMaterial color="#8e44ad" transparent opacity={0.8} depthTest={false} />
+        </mesh>
+      )}
+      {at && <GuideLines box={box} gx={at.gx} gy={at.gy} />}
+    </>
+  );
+}

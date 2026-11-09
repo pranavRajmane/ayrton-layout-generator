@@ -106,6 +106,15 @@ export const api = {
                                 width: number; thickness: number; ingate: string | null }) =>
     call<DesignState>("POST", `/api/designs/${id}/workflow/ingate`, g),
   removeIngate: (id: string, ingate: string) => call<DesignState>("POST", `/api/designs/${id}/workflow/remove_ingate`, { ingate }),
+  setCup: (id: string, c: { d_top: number | null; height: number | null }) =>
+    call<DesignState>("POST", `/api/designs/${id}/workflow/cup`, c),
+  setWell: (id: string, w: { d: number | null; depth: number | null; filter: { shape: string; size: number; thickness: number } | null }) =>
+    call<DesignState>("POST", `/api/designs/${id}/workflow/well`, w),
+  addFeeder: (id: string, f: { kind: string; x: number; y: number; d: number; height: number;
+                               neck: { width: number; thickness: number; side: string } | null }) =>
+    call<DesignState>("POST", `/api/designs/${id}/workflow/feeder`, f),
+  addVent: (id: string, v: { x: number; y: number; d: number }) => call<DesignState>("POST", `/api/designs/${id}/workflow/vent`, v),
+  removeAny: (id: string, instance: string) => call<DesignState>("POST", `/api/designs/${id}/workflow/remove`, { instance }),
   removeRunner: (id: string, runner: string) => call<DesignState>("POST", `/api/designs/${id}/workflow/remove_runner`, { runner }),
   patch: (id: string, ops: unknown[]) => call<DesignState>("POST", `/api/designs/${id}/patch`, ops),
   undo: (id: string) => call<DesignState>("POST", `/api/designs/${id}/undo`),

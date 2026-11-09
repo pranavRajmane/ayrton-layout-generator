@@ -7,7 +7,7 @@ import type { SetupView } from "./Viewer";
 import { nearestOn, type Guides } from "./Setup3D";
 
 type Run = (f: () => Promise<DesignState | void>) => void;
-type Step = 1 | 2 | 3 | 4;
+type Step = 1 | 2 | 3 | 4 | 5;
 type XY = [number, number];
 
 // key names as the keyboard prints them: a Mac's Option is the browser's Alt, its
@@ -119,6 +119,16 @@ export function useSetup(state: DesignState | null, run: Run, setPlan: (plan: bo
   const [gSide, setGSide] = useState<string>(lastGate.side ?? "drag");
   const [gW, setGW] = useState<string>(str(lastGate.width)), [gT, setGT] = useState<string>(str(lastGate.thickness));
   const [gL, setGL] = useState<string>(str(lastGate.length));
+  // step 2: cup, well, filter
+  const [cupD, setCupD] = useState(""), [cupH, setCupH] = useState("");
+  const [wellD, setWellD] = useState(""), [wellDepth, setWellDepth] = useState("");
+  const [useFilter, setUseFilter] = useState(false);
+  const [fShape, setFShape] = useState("square"), [fSize, setFSize] = useState(""), [fT, setFT] = useState("");
+  // step 5: feeders and vents
+  const [tool, setTool] = useState<"top" | "side" | "vent">("top");
+  const [fdD, setFdD] = useState(""), [fdH, setFdH] = useState("");
+  const [nW, setNW] = useState(""), [nT, setNT] = useState(""), [nSide, setNSide] = useState("cope");
+  const [vD, setVD] = useState("");
   // step 4
   const [igSide, setIgSide] = useState("drag");
   const [igW, setIgW] = useState(""), [igT, setIgT] = useState("");
@@ -139,6 +149,13 @@ export function useSetup(state: DesignState | null, run: Run, setPlan: (plan: bo
     setDTop(str(sprue?.params.d_top)); setDBot(str(sprue?.params.d_bottom));
     setActive(runnerIds[0] ?? null);
     setSelIg(null);
+    {
+      const cup = state ? el(state, "pouring_cup") : null, well = state ? el(state, "sprue_well") : null;
+      const fl = state ? el(state, "filter") : null;
+      setCupD(str(cup?.params.d_top)); setCupH(str(cup?.params.height));
+      setWellD(str(well?.params.d)); setWellDepth(str(well?.params.depth));
+      setUseFilter(!!fl); setFShape(fl?.params.shape ?? "square"); setFSize(str(fl?.params.size)); setFT(str(fl?.params.thickness));
+    }
     setSuggesting(!b); setOptions(null); setProposal(null); setChoice("widest");
     setStep(gates.length ? 4 : sprue ? 3 : 1);
     setPart("part"); setExtending(false); setDraft([]); setSel(null);
@@ -377,6 +394,27 @@ export function useSetup(state: DesignState | null, run: Run, setPlan: (plan: bo
     };
   }
 
+  if (step === 5 && box) {
+    const d = tool === "vent" ? num(vD) : num(fdD);
+    const ready = tool === "vent" ? ok(d) : tool === "top" ? ok(d, num(fdH)) : ok(d, num(fdH), num(nW), num(nT));
+    view = {
+      mode: "place",
+      d: ready ? d : 0,
+      guides,
+      hint: !ready ? "Type the sizes first."
+        : tool === "top" ? "Click on the part where the feeder stands"
+        : tool === "side" ? "Click beside the part: the feeder stands there and its neck runs to the part"
+        : "Click on the part where the vent goes up",
+      onPlace: (p) => {
+        if (!ready) return;
+        const [x, y] = [Math.round(p[0]), Math.round(p[1])];
+        if (tool === "vent") run(() => api.addVent(sid, { x, y, d }));
+        else run(() => api.addFeeder(sid, { kind: tool, x, y, d, height: num(fdH),
+          neck: tool === "side" ? { width: num(nW), thickness: num(nT), side: nSide } : null }));
+      },
+    };
+  }
+
   if (step === 4 && box && sprueAt) {
     view = {
       mode: "ingates",
@@ -415,6 +453,7 @@ export function useSetup(state: DesignState | null, run: Run, setPlan: (plan: bo
         {head(2, "Sprue", !!sprue, !!box)}
         {head(3, "Runners", runnerIds.length > 0, !!sprue)}
         {head(4, "Ingates", gates.length > 0, runnerIds.length > 0)}
+        {head(5, "Feeders & vents", (state.document.elements as any[]).some((e) => e.type === "feeder" || e.type === "vent"), !!box)}
       </div>
 
       {fitting && (
@@ -568,6 +607,49 @@ export function useSetup(state: DesignState | null, run: Run, setPlan: (plan: bo
                   onCommit={() => { if (Number.isFinite(num(sy)) && num(sy) !== sprueAt![1]) placeSprue([sprueAt![0], num(sy)]); }} />
               </div>
               <p className="muted">Length {Number(sprue.params.length).toFixed(1)} mm.</p>
+
+              <h4>Pouring cup</h4>
+              <p className="muted">A cone cut into the top of the cope over the sprue; its bottom is the sprue's top.</p>
+              <div className="fields">
+                <Field label="Top diameter" value={cupD} set={setCupD} />
+                <Field label="Height" value={cupH} set={setCupH} />
+              </div>
+              <div className="row">
+                <button disabled={!ok(num(cupD), num(cupH))} onClick={() => run(() => api.setCup(sid, { d_top: num(cupD), height: num(cupH) }))}>
+                  {el(state, "pouring_cup") ? "Update cup" : "Add cup"}
+                </button>
+                {el(state, "pouring_cup") && <button onClick={() => run(() => api.setCup(sid, { d_top: null, height: null }))}>Remove cup</button>}
+              </div>
+
+              <h4>Sprue well and filter</h4>
+              <p className="muted">The well under the sprue that the runners leave from, reaching below the deepest runner.
+                A filter lies over it on the parting plane, the sprue coming down onto it.</p>
+              <div className="fields">
+                <Field label="Well diameter" value={wellD} set={setWellD} />
+                <Field label="Depth below the runners" value={wellDepth} set={setWellDepth} />
+              </div>
+              <label className="check"><input type="checkbox" checked={useFilter} onChange={(e) => setUseFilter(e.target.checked)} /> Filter over the well</label>
+              {useFilter && (
+                <>
+                  <div className="row">
+                    {["square", "round"].map((sh) => (
+                      <button key={sh} className={fShape === sh ? "toggle on" : "toggle"} onClick={() => setFShape(sh)}>{sh}</button>
+                    ))}
+                  </div>
+                  <div className="fields">
+                    <Field label={fShape === "square" ? "Filter side" : "Filter diameter"} value={fSize} set={setFSize} />
+                    <Field label="Filter thickness" value={fT} set={setFT} />
+                  </div>
+                </>
+              )}
+              <div className="row">
+                <button disabled={!ok(num(wellD)) || !(num(wellDepth) >= 0) || (useFilter && !ok(num(fSize), num(fT)))}
+                  onClick={() => run(() => api.setWell(sid, { d: num(wellD), depth: num(wellDepth),
+                    filter: useFilter ? { shape: fShape, size: num(fSize), thickness: num(fT) } : null }))}>
+                  {el(state, "sprue_well") ? "Update well" : "Add well"}
+                </button>
+                {el(state, "sprue_well") && <button onClick={() => run(() => api.setWell(sid, { d: null, depth: null, filter: null }))}>Remove well</button>}
+              </div>
               <button className="primary" onClick={() => setStep(3)}>Next: runner</button>
             </>
           )}
@@ -653,6 +735,48 @@ export function useSetup(state: DesignState | null, run: Run, setPlan: (plan: bo
             <Field label="Ingate width" value={gW} set={setGW} onCommit={() => regate()} />
             <Field label="Ingate thickness" value={gT} set={setGT} onCommit={() => regate()} />
             <Field label="Ingate length" value={gL} set={setGL} onCommit={() => regate()} />
+          </div>
+        </section>
+      )}
+
+      {step === 5 && box && (
+        <section>
+          <h4>Feeders and vents</h4>
+          <div className="row">
+            {([["top", "Top feeder"], ["side", "Side feeder"], ["vent", "Vent"]] as const).map(([k, label]) => (
+              <button key={k} className={tool === k ? "toggle on" : "toggle"} onClick={() => setTool(k)}>{label}</button>
+            ))}
+          </div>
+          {tool !== "vent" ? (
+            <div className="fields">
+              <Field label="Feeder diameter" value={fdD} set={setFdD} />
+              <Field label="Feeder height" value={fdH} set={setFdH} />
+              {tool === "side" && (
+                <>
+                  <Field label="Neck width" value={nW} set={setNW} />
+                  <Field label="Neck thickness" value={nT} set={setNT} />
+                </>
+              )}
+            </div>
+          ) : (
+            <div className="fields"><Field label="Vent diameter" value={vD} set={setVD} /></div>
+          )}
+          {tool === "side" && (
+            <div className="row">
+              {["cope", "drag"].map((sd) => (
+                <button key={sd} className={nSide === sd ? "toggle on" : "toggle"} onClick={() => setNSide(sd)}>Neck in the {sd}</button>
+              ))}
+            </div>
+          )}
+          <p className="muted">{tool === "top" ? "A closed feeder standing on the part's top, in the cope." : tool === "side"
+            ? "A closed feeder standing on the parting plane beside the part, joined to it by a neck." : "A round vent from the part straight up to the top of the box."}</p>
+          <div className="parts">
+            {(state.document.elements as any[]).filter((e) => e.type === "feeder" || e.type === "vent").map((e) => (
+              <div key={e.id} className="partrow">
+                <span className="grow">{e.type === "vent" ? `Vent · ⌀${e.params.d}` : `${e.params.kind === "top" ? "Top" : "Side"} feeder · ⌀${e.params.d} × ${e.params.height}`}</span>
+                <button className="link" onClick={() => run(() => api.removeAny(sid, e.id))}>remove</button>
+              </div>
+            ))}
           </div>
         </section>
       )}

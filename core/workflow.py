@@ -190,6 +190,181 @@ def _drops(data: dict, sprue: str) -> list[dict]:
     return [c for c in data["connections"] if c["joint"] == "drop" and c["from"]["instance"] == sprue]
 
 
+def _of_type(data: dict, t: str) -> dict | None:
+    return next((e for e in data["elements"] if e["type"] == t), None)
+
+
+def drop_source(data: dict) -> str:
+    """What the runners drop from: the sprue well when there is one, else the sprue."""
+    w = _of_type(data, "sprue_well")
+    return w["id"] if w else SPRUE
+
+
+def _edit(doc, fn) -> list[dict]:
+    """A change made on a copy of the document, as the patch from the document to it."""
+    new = copy.deepcopy(doc.data)
+    fn(new)
+    return jsonpatch.make_patch(doc.data, new).patch
+
+
+def _drop_conns_from(data: dict, src: str, dst: str) -> None:
+    for c in data["connections"]:
+        if c["joint"] == "drop" and c["from"]["instance"] == src:
+            c["from"]["instance"] = dst
+
+
+def _remove(data: dict, ids: set[str]) -> None:
+    data["connections"] = [c for c in data["connections"] if not ids & {c["from"]["instance"], c["to"]["instance"]}]
+    data["elements"] = [e for e in data["elements"] if e["id"] not in ids]
+
+
+def _down(x: float, y: float, z: float, port: str = "inlet") -> dict:
+    """An anchor for something placed straight down from (x, y, z): its inlet there, flow -Z."""
+    return {"port": port, "frame": {"origin": [float(x), float(y), float(z)], "normal": [0, 0, -1], "up": [1, 0, 0]}}
+
+
+# ---- on the sprue: the pouring cup; under it: the filter and the well -------------------------
+
+CUP, WELL, FILTER = "pouring_cup", "sprue_well", "filter"
+
+
+def cup_patch(doc, d_top: float | None, height: float | None = None) -> list[dict]:
+    """The conical pouring cup on the sprue (d_top None: none)."""
+    data = doc.data
+    sprue = _of_type(data, "sprue")
+    if sprue is None:
+        raise WorkflowError("place the sprue first")
+    if d_top is not None and (d_top <= 0 or not height or height <= 0):
+        raise WorkflowError("type the cup's top diameter and height")
+
+    def fn(d):
+        _remove(d, {CUP})
+        if d_top is None:
+            return
+        x, y, z = sprue["anchor"]["frame"]["origin"]
+        d["elements"].append({"id": CUP, "type": "pouring_cup", "type_version": "0.1", "name": "pouring cup",
+                              "params": {"d_top": float(d_top), "d_bottom": float(sprue["params"]["d_top"]),
+                                         "height": float(height)}, "anchor": _down(x, y, z)})
+        d["connections"].append({"id": "cup", "from": {"instance": CUP, "port": "outlet"},
+                                 "to": {"instance": SPRUE, "port": "inlet"}, "joint": "butt"})
+    return _edit(doc, fn)
+
+
+def well_patch(doc, d: float | None, depth: float | None = None, filt: dict | None = None) -> list[dict]:
+    """The sprue well under the sprue (d None: none), with a filter over it (filt {shape, size,
+    thickness}) or not; the runners drop from the well."""
+    data = doc.data
+    sprue = _of_type(data, "sprue")
+    if sprue is None:
+        raise WorkflowError("place the sprue first")
+    if d is not None and (d <= 0 or depth is None or depth < 0):
+        raise WorkflowError("type the well's diameter and depth")
+    if filt is not None and (filt.get("shape") not in ("square", "round") or
+                             min(float(filt.get("size") or 0), float(filt.get("thickness") or 0)) <= 0):
+        raise WorkflowError("type the filter's size and thickness")
+    if filt is not None and d is None:
+        raise WorkflowError("a filter sits over the sprue well: give the well too")
+
+    def fn(dd):
+        _drop_conns_from(dd, WELL, SPRUE)
+        _remove(dd, {WELL, FILTER})
+        if d is None:
+            return
+        x, y, _ = sprue["anchor"]["frame"]["origin"]
+        dd["elements"].append({"id": WELL, "type": "sprue_well", "type_version": "0.1", "name": "sprue well",
+                               "params": {"d": float(d), "depth": float(depth), "length": 1.0, "embed": 0.0},
+                               "anchor": _down(x, y, 0.0)})
+        top = WELL
+        if filt is not None:
+            dd["elements"].append({"id": FILTER, "type": "filter", "type_version": "0.1", "name": "filter",
+                                   "params": {"shape": filt["shape"], "size": float(filt["size"]),
+                                              "thickness": float(filt["thickness"]), "embed": 0.0},
+                                   "anchor": _down(x, y, float(filt["thickness"]))})
+            dd["connections"].append({"id": "filter_well", "from": {"instance": FILTER, "port": "outlet"},
+                                      "to": {"instance": WELL, "port": "inlet"}, "joint": "stack"})
+            top = FILTER
+        dd["connections"].append({"id": "sprue_" + top, "from": {"instance": SPRUE, "port": "outlet"},
+                                  "to": {"instance": top, "port": "inlet"}, "joint": "stack"})
+        _drop_conns_from(dd, SPRUE, WELL)
+    return _edit(doc, fn)
+
+
+# ---- feeders and vents ----------------------------------------------------------------------------
+
+def _up(x: float, y: float, z: float, port: str = "base") -> dict:
+    """An anchor for something standing up from (x, y, z): its base there, facing down."""
+    return {"port": port, "frame": {"origin": [float(x), float(y), float(z)], "normal": [0, 0, -1], "up": [1, 0, 0]}}
+
+
+def feeder_patch(doc, kind: str, x: float, y: float, z: float, d: float, height: float,
+                 neck: dict | None = None) -> list[dict]:
+    """A top feeder standing on the part at (x, y, z), or a side feeder standing on the parting plane at
+    (x, y) with its neck {width, thickness, side, end} running from it to the part's edge at end."""
+    data = doc.data
+    if kind not in ("top", "side"):
+        raise WorkflowError("a feeder is top or side")
+    if min(d, height) <= 0:
+        raise WorkflowError("type the feeder's diameter and height")
+    if kind == "side" and (neck is None or min(float(neck.get("width") or 0), float(neck.get("thickness") or 0)) <= 0):
+        raise WorkflowError("type the neck's width and thickness")
+    ids = {e["id"] for e in data["elements"]}
+    cids = {c["id"] for c in data["connections"]}
+    fid = next_id(ids, "feeder")
+
+    def fn(dd):
+        dd["elements"].append({"id": fid, "type": "feeder", "type_version": "0.1", "name": fid,
+                               "params": {"kind": kind, "d": float(d), "height": float(height)},
+                               "anchor": _up(x, y, z if kind == "top" else 0.0)})
+        if kind == "top":
+            dd["connections"].append({"id": next_id(cids, "gate"), "from": {"instance": fid, "port": "base"},
+                                      "to": {"instance": "part", "port": "gate"}, "joint": "gate"})
+            return
+        nid = next_id(ids | {fid}, "neck")
+        dd["elements"].append({"id": nid, "type": "neck", "type_version": "0.1", "name": nid,
+                               "params": {"side": neck.get("side", "cope"), "width": float(neck["width"]),
+                                          "thickness": float(neck["thickness"]),
+                                          "waypoints": [[float(x), float(y), 0.0],
+                                                        [float(neck["end"][0]), float(neck["end"][1]), 0.0]]}})
+        tee = next_id(cids, "tee")
+        dd["connections"] += [
+            {"id": tee, "from": {"instance": fid, "port": "base"}, "to": {"instance": nid, "port": "inlet"},
+             "joint": "tee"},
+            {"id": next_id(cids | {tee}, "gate"), "from": {"instance": nid, "port": "outlet"},
+             "to": {"instance": "part", "port": "gate"}, "joint": "gate"}]
+    return _edit(doc, fn)
+
+
+def vent_patch(doc, x: float, y: float, z: float, d: float) -> list[dict]:
+    """A round vent from the part at (x, y, z) straight up to the top of the box."""
+    data = doc.data
+    b = box(data)
+    if b is None:
+        raise WorkflowError("make the box first")
+    if d <= 0:
+        raise WorkflowError("type the vent's diameter")
+    if z >= b["top"]:
+        raise WorkflowError("the part reaches the top of the box there")
+    ids = {e["id"] for e in data["elements"]}
+    cids = {c["id"] for c in data["connections"]}
+    vid = next_id(ids, "vent")
+
+    def fn(dd):
+        dd["elements"].append({"id": vid, "type": "vent", "type_version": "0.1", "name": vid,
+                               "params": {"d": float(d), "length": b["top"] - float(z)}, "anchor": _up(x, y, z)})
+        dd["connections"].append({"id": next_id(cids, "gate"), "from": {"instance": vid, "port": "base"},
+                                  "to": {"instance": "part", "port": "gate"}, "joint": "gate"})
+    return _edit(doc, fn)
+
+
+def remove_patch(doc, inst: str) -> list[dict]:
+    """An element and what it feeds by tees (a side feeder's neck, a runner's branches and ingates)."""
+    if _index(doc.data, inst) is None:
+        raise WorkflowError(f"no element '{inst}'")
+    if inst in (WELL, FILTER):
+        return well_patch(doc, None)
+    return _edit(doc, lambda d: _remove(d, _fed_by(d, inst)))
+
+
 def runners(data: dict) -> list[str]:
     """Every runner, in the order they were drawn (from the sprue or branched off another runner)."""
     return [e["id"] for e in data["elements"] if e["type"] == "runner"]
@@ -361,7 +536,7 @@ def runner_patch(doc, side: str, w_parting: float, w_far: float, height: float, 
         else:
             cid = next_id(cids, "drop")
             ops.append({"op": "add", "path": "/connections/-",
-                        "value": {"id": cid, "from": {"instance": SPRUE, "port": "outlet"},
+                        "value": {"id": cid, "from": {"instance": drop_source(data), "port": "outlet"},
                                   "to": {"instance": rid, "port": "inlet"}, "joint": "drop"}})
         cids.add(cid)
     else:
@@ -501,28 +676,57 @@ def remove_element_patch(doc, inst: str) -> list[dict]:
 # ---- keeping the sprue on the box and the runner ---------------------------------------
 
 def sync(data: dict) -> list[dict]:
-    """Patch that sets every sprue's inlet on the cope top and its bottom on the
-    floor of the deepest runner it drops into (or on the parting plane)."""
+    """Patch that keeps what stands on the sprue's axis in its place: the cup's top on the box top (its
+    bottom diameter the sprue's top), the sprue under it, the filter on the parting plane and the well
+    under it (down past the deepest runner by its depth) or, without a well, the sprue's bottom on the
+    deepest runner floor; and every vent reaching the box top."""
     b = box(data)
     if b is None:
         return []
-    out = []
-    for i, e in enumerate(data["elements"]):
-        if e["type"] != "sprue" or not e.get("anchor"):
-            continue
-        floor = 0.0                                  # down to the deepest runner it drops into
-        for c in _drops(data, e["id"]):
-            j = _index(data, c["to"]["instance"])
+    out: list[dict] = []
+    idx = {e["id"]: i for i, e in enumerate(data["elements"])}
+
+    def put(i: int, path: str, value) -> None:
+        cur = data["elements"][i]
+        for k in path.split("/"):
+            cur = cur.get(k) if isinstance(cur, dict) else None
+        same = (cur is not None and (np.allclose(cur, value, atol=1e-9) if isinstance(value, list)
+                                      else abs(float(cur) - float(value)) <= 1e-9))
+        if not same:
+            out.append({"op": "replace" if cur is not None else "add", "path": f"/elements/{i}/{path}", "value": value})
+
+    sprue = _of_type(data, "sprue")
+    if sprue is not None and sprue.get("anchor"):
+        x, y = sprue["anchor"]["frame"]["origin"][:2]
+        top = b["top"]
+        cup, well, filt = _of_type(data, "pouring_cup"), _of_type(data, "sprue_well"), _of_type(data, "filter")
+        if cup is not None:
+            put(idx[cup["id"]], "anchor/frame/origin", [x, y, top])
+            put(idx[cup["id"]], "params/d_bottom", float(sprue["params"]["d_top"]))
+            top -= float(cup["params"]["height"])
+        floor = 0.0                                  # the deepest runner the stack drops into
+        for c in _drops(data, drop_source(data)):
+            j = idx.get(c["to"]["instance"])
             if j is not None and data["elements"][j]["type"] == "runner":
                 rp = data["elements"][j]["params"]
                 floor = min(floor, -float(rp.get("height", 25.0)) if rp.get("side", "drag") == "drag" else 0.0)
-        length = b["top"] - floor
-        if abs(e["params"].get("length", 0) - length) > 1e-9:
-            op = "replace" if "length" in e["params"] else "add"
-            out.append({"op": op, "path": f"/elements/{i}/params/length", "value": length})
-        o = e["anchor"]["frame"]["origin"]
-        if abs(o[2] - b["top"]) > 1e-9:
-            out.append({"op": "replace", "path": f"/elements/{i}/anchor/frame/origin", "value": [o[0], o[1], b["top"]]})
+        bottom = floor
+        if well is not None:
+            wtop = 0.0 if filt is not None else floor
+            if filt is not None:
+                t = float(filt["params"]["thickness"])
+                put(idx[filt["id"]], "anchor/frame/origin", [x, y, t])
+                bottom = t
+            else:
+                bottom = wtop
+            put(idx[well["id"]], "anchor/frame/origin", [x, y, wtop])
+            put(idx[well["id"]], "params/length", max(wtop - (floor - float(well["params"]["depth"])), 1.0))
+        i = idx[sprue["id"]]
+        put(i, "anchor/frame/origin", [x, y, top])
+        put(i, "params/length", top - bottom)
+    for e in data["elements"]:
+        if e["type"] == "vent" and e.get("anchor"):
+            put(idx[e["id"]], "params/length", max(b["top"] - float(e["anchor"]["frame"]["origin"][2]), 0.5))
     return out
 
 

@@ -43,7 +43,8 @@ class ExportError(RuntimeError):
 
 
 def _kind(name: str) -> str:
-    """part, part.<cavity>, core.<id>, gating.<id>, mold.flask -> part, part, core, gating, mold."""
+    """part, part.<cavity>, core.<id>, gating.<id>, filter.<id>, feeder.<id>, vent.<id>, mold.flask -> the part
+    before the dot (filters are porous to the solver; feeders and vents are metal like the gating)."""
     return name.split(".", 1)[0] if "." in name else name
 
 
@@ -115,7 +116,7 @@ def export(res: RegenResult, out_dir: str | Path, materials_json: str | Path | N
     for name, s in named.items():
         f = proj / "regions" / f"{name}.stl"
         export_stl(placed(s, shift), f, **STL_TOL)
-        b = res.built.get(name.split(".", 1)[1]) if name.startswith("gating.") else None
+        b = res.built.get(name.split(".", 1)[1]) if _kind(name) in ("gating", "filter", "feeder", "vent") else None
         regions.append({"name": name, "kind": _kind(name), "file": f"regions/{f.name}",
                         "volume_mm3": solids_volume(s), "instance": b.instance if b else None,
                         "type": b.type if b else None, "type_version": b.element.version if b else None})

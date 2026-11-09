@@ -4,7 +4,7 @@ import { GizmoHelper, GizmoViewport, Grid, OrbitControls, useGLTF } from "@react
 import * as THREE from "three";
 import type { DesignState, MeshRef, Vec3 } from "./api";
 import {
-  IngateSketch, MoldBox, PartMover, PartOutline, PartSketch, PlanCamera, PlanSketch,
+  IngateSketch, MoldBox, PartMover, PartOutline, PartSketch, PlaceSketch, PlanCamera, PlanSketch,
   type Box, type Guides, type IngateLine, type OtherRunner, type RunnerLine, type RunnerSketch, type SprueSketch,
 } from "./Setup3D";
 
@@ -14,6 +14,7 @@ export type SetupView =
   | { mode: "none" }
   | { mode: "fit"; part: string; onSelectPart: (id: string) => void; onMovePart: (d: Vec3, id?: string) => void; guides?: Guides }
   | { mode: "preview"; move: number[][]; box: Box | null }        // a suggested fit, shown before it is applied
+  | { mode: "place"; hint: string; d: number; onPlace: (p: [number, number]) => void; guides?: Guides }
   | { mode: "plan"; sprue: SprueSketch; runner: RunnerSketch | null; hint: string;
       others: OtherRunner[]; onPickOther: (id: string) => void; guides?: Guides }
   | { mode: "ingates"; hint: string; runners: RunnerLine[]; ingates: IngateLine[]; width: number | null;
@@ -28,7 +29,9 @@ function partOf(name: string): string {
   return bits.length > 2 ? bits[2] : "part";              // core.<id> / core.<id>.<cavity>
 }
 
-const COLORS: Record<string, string> = { part: "#9aa4b1", gating: "#e08a3c", core: "#d8c38a", mold: "#c9b28f" };
+const COLORS: Record<string, string> = {
+  part: "#9aa4b1", gating: "#e08a3c", core: "#d8c38a", mold: "#c9b28f", feeder: "#8e44ad", filter: "#3d9970", vent: "#2c7fb8",
+};
 THREE.Object3D.DEFAULT_UP.set(0, 0, 1); // the mold frame is Z-up
 
 // a mesh that fails to load (a design session the API no longer has) is left out, not the whole view
@@ -212,11 +215,14 @@ export default function Viewer({
             </mesh>
           )
         )}
-        {box && (planOn || setup.mode === "plan" || setup.mode === "ingates") && <PartOutline lines={state.parting_outline ?? []} />}
+        {box && (planOn || setup.mode === "plan" || setup.mode === "ingates" || setup.mode === "place") && <PartOutline lines={state.parting_outline ?? []} />}
         {box && planOn && setup.mode === "fit" && (
           <PartSketch box={box} selected={setup.part} onSelect={setup.onSelectPart} guides={setup.guides}
             onMove={(id, d) => setup.onMovePart(d, id)}
             parts={(state.parts ?? []).map((p) => ({ id: p.id, name: p.name, lo: [p.bbox[0][0], p.bbox[0][1]], hi: [p.bbox[1][0], p.bbox[1][1]] }))} />
+        )}
+        {box && setup.mode === "place" && (
+          <PlaceSketch box={box} d={setup.d} onPlace={setup.onPlace} onCursor={setCursor} guides={setup.guides} />
         )}
         {box && setup.mode === "ingates" && (
           <IngateSketch box={box} runners={setup.runners} ingates={setup.ingates} width={setup.width}
@@ -260,7 +266,7 @@ export default function Viewer({
           <button className={!planOn ? "on" : ""} onClick={() => onPlan(false)}>3D</button>
         </div>
       )}
-      {(setup.mode === "plan" || setup.mode === "ingates") && setup.hint && <div className="viewhint">{setup.hint}</div>}
+      {(setup.mode === "plan" || setup.mode === "ingates" || setup.mode === "place") && setup.hint && <div className="viewhint">{setup.hint}</div>}
       {setup.mode === "fit" && planOn && <div className="viewhint">Drag a part to move it · it snaps to line up with the other parts and the box · hold {/Mac/.test(navigator.platform) ? "Option ⌥" : "Alt"} for free</div>}
       {planOn && cursor && <div className="viewcursor">x {cursor[0].toFixed(0)} · y {cursor[1].toFixed(0)} mm</div>}
     </div>

@@ -103,12 +103,16 @@ def test_taps_on_path_elements(el):
         assert isinstance(el.tap_frame(p, 0.5, side), Frame)
 
 
+REGION_KINDS = ("gating", "filter", "feeder", "vent")      # the solver tells these regions apart
+
+
 def test_derived_validate_tags(el):
     p = el.resolve_params({})
     json.dumps(el.derived(p))
     issues = el.validate(p, ValidationContext(instance_id="x_1"))
     assert isinstance(issues, list) and all(isinstance(i, ValidationIssue) for i in issues)
     tags = el.tags("x_1")
-    assert tags["solid"] == "gating.x_1"
+    kind, inst = tags["solid"].split(".", 1)
+    assert inst == "x_1" and kind in REGION_KINDS
     port_ids = {x.id for x in el.ports(p)}
     assert set(tags.get("faces", {})) <= port_ids

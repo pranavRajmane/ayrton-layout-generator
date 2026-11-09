@@ -654,3 +654,83 @@ def add_matchbox(box: dict = Body(...)) -> list[dict]:
         return fit.add_standard_box(box)
     except (KeyError, ValueError, TypeError) as e:
         raise HTTPException(422, f"bad box: {e}") from None
+
+
+# ---- on the sprue: cup, filter, well; on the part: feeders and vents ---------------------------
+
+def _part_top(s: Session, x: float, y: float) -> float:
+    """Height of the part's top at (x, y) (a ray straight down onto it)."""
+    from OCP.gp import gp_Dir, gp_Lin, gp_Pnt
+    from OCP.IntCurvesFace import IntCurvesFace_ShapeIntersector
+    pm = _part(s)
+    hit = IntCurvesFace_ShapeIntersector()
+    hit.Load(pm.metal.wrapped, 1e-6)
+    hit.Perform(gp_Lin(gp_Pnt(x, y, pm.bbox[1][2] + 10.0), gp_Dir(0, 0, -1)), 0.0, 1e9)
+    zs = [hit.Pnt(i).Z() for i in range(1, hit.NbPnt() + 1)]
+    if not zs:
+        raise HTTPException(422, f"there is no part at ({x:.0f}, {y:.0f}): click on the part")
+    return float(max(zs))
+
+
+@app.post("/api/designs/{sid}/workflow/cup")
+def set_cup(sid: str, d_top: float | None = Body(None), height: float | None = Body(None)) -> dict:
+    """The pouring cup on the sprue (d_top null: none)."""
+    s = _session(sid)
+    _workflow(s, lambda: workflow.cup_patch(s.doc, d_top, height))
+    return _state(sid)
+
+
+@app.post("/api/designs/{sid}/workflow/well")
+def set_well(sid: str, d: float | None = Body(None), depth: float | None = Body(None),
+             filter: dict | None = Body(None)) -> dict:
+    """The sprue well (d null: none), with the filter over it or not."""
+    s = _session(sid)
+    _workflow(s, lambda: workflow.well_patch(s.doc, d, depth, filter))
+    return _state(sid)
+
+
+@app.post("/api/designs/{sid}/workflow/feeder")
+def add_feeder(sid: str, kind: str = Body(...), x: float = Body(...), y: float = Body(...), d: float = Body(...),
+               height: float = Body(...), neck: dict | None = Body(None)) -> dict:
+    """A top feeder where (x, y) falls on the part, or a side feeder standing at (x, y) beside it, its neck
+    {width, thickness, side} running to where it first meets the part."""
+    s = _session(sid)
+    z = 0.0
+    if kind == "top":
+        z = _part_top(s, x, y)
+    elif kind == "side":
+        if not neck or min(float(neck.get("width") or 0), float(neck.get("thickness") or 0)) <= 0:
+            raise HTTPException(422, "type the neck's width and thickness")
+        side = neck.get("side", "cope")
+        outline = _runner_outline(s, side, float(neck["thickness"]), None) or []
+        pts = np.array([p for line in outline for p in line], float)
+        if not len(pts):
+            raise HTTPException(422, "the part does not reach the parting plane here")
+        q = pts[np.argmin(np.hypot(pts[:, 0] - x, pts[:, 1] - y))]
+        dist = float(np.hypot(q[0] - x, q[1] - y))
+        if dist < d / 2:
+            raise HTTPException(422, "the feeder stands on the part: move it beside the part")
+        u = (q - (x, y)) / dist
+        hit = workflow._crossing([[x, y, 0.0], [x + u[0] * (dist + 50), y + u[1] * (dist + 50), 0.0]], outline,
+                                 float(neck["width"]) / 2)
+        if hit is None:
+            raise HTTPException(422, "no part beside the feeder")
+        neck = {**neck, "side": side, "end": hit[1].tolist()}
+    _workflow(s, lambda: workflow.feeder_patch(s.doc, kind, x, y, z, d, height, neck))
+    return _state(sid)
+
+
+@app.post("/api/designs/{sid}/workflow/vent")
+def add_vent(sid: str, x: float = Body(...), y: float = Body(...), d: float = Body(...)) -> dict:
+    s = _session(sid)
+    z = _part_top(s, x, y)
+    _workflow(s, lambda: workflow.vent_patch(s.doc, x, y, z, d))
+    return _state(sid)
+
+
+@app.post("/api/designs/{sid}/workflow/remove")
+def remove_any(sid: str, instance: str = Body(..., embed=True)) -> dict:
+    """An element and what hangs off it (a side feeder's neck, the filter with the well)."""
+    s = _session(sid)
+    _workflow(s, lambda: workflow.remove_patch(s.doc, instance))
+    return _state(sid)

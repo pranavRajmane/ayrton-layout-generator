@@ -234,3 +234,32 @@ def test_ingates_follow_their_part(tmp_path):
     st = client.post(f"/api/designs/{sid}/undo").json()                      # the move and the re-gating: one step
     g = next(e for e in st["document"]["elements"] if e["type"] == "ingate")["params"]["waypoints"]
     assert g[1][0] == pytest.approx(-100, abs=0.01)
+
+
+def test_cup_well_feeders_and_vent_through_the_api(tmp_path):
+    import shutil
+    part = shutil.copy(PLATE.with_name("plate.step"), tmp_path / "plate.step")     # 200 x 150 x 20
+    sid = client.post("/api/designs/new", json={"part": str(part)}).json()["id"]
+    client.post(f"/api/designs/{sid}/workflow/box", json={"length": 600, "width": 400, "height": 300, "parting": 150})
+    client.post(f"/api/designs/{sid}/workflow/sprue", json={"x": -250, "y": 0, "d_top": 30, "d_bottom": 24})
+    client.post(f"/api/designs/{sid}/workflow/runner",
+                json={"side": "drag", "w_parting": 30, "w_far": 20, "height": 25, "points": [[0, 0, 0]],
+                      "gate": {"width": 40, "thickness": 8, "length": 20, "side": "drag"}})
+    client.post(f"/api/designs/{sid}/workflow/cup", json={"d_top": 80, "height": 60})
+    client.post(f"/api/designs/{sid}/workflow/well",
+                json={"d": 60, "depth": 20, "filter": {"shape": "round", "size": 50, "thickness": 20}})
+    st = client.post(f"/api/designs/{sid}/workflow/feeder",
+                     json={"kind": "top", "x": 50, "y": 0, "d": 60, "height": 90}).json()
+    f = next(e for e in st["document"]["elements"] if e["id"] == "feeder_1")
+    assert f["anchor"]["frame"]["origin"][2] == pytest.approx(10)            # on the plate's top (z -10..10)
+    st = client.post(f"/api/designs/{sid}/workflow/feeder",
+                     json={"kind": "side", "x": 0, "y": 150, "d": 60, "height": 90,
+                           "neck": {"width": 30, "thickness": 10, "side": "cope"}}).json()
+    n = next(e for e in st["document"]["elements"] if e["type"] == "neck")
+    assert n["params"]["waypoints"][1][1] == pytest.approx(75, abs=0.01)      # to the plate's edge
+    bad = client.post(f"/api/designs/{sid}/workflow/vent", json={"x": 250, "y": 0, "d": 10})
+    assert bad.status_code == 422 and "no part" in bad.text
+    st = client.post(f"/api/designs/{sid}/workflow/vent", json={"x": -50, "y": 40, "d": 10}).json()
+    assert not [i for i in st["issues"] if i["severity"] in ("error", "warning")]
+    st = client.post(f"/api/designs/{sid}/workflow/remove", json={"instance": "feeder_2"}).json()
+    assert not [e for e in st["document"]["elements"] if e["type"] == "neck"]

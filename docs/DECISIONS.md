@@ -187,3 +187,18 @@ Architectural choices and why, newest last.  Foundry numbers are never decided h
     again from them against the part where it now is, in the same undo step as the move. Ingates drawn
     by hand that end on the moved part's footprint move their end with it. Part moves in the guided set-up
     no longer carry element anchors along: the sprue stands in the box.
+48. **On the sprue's axis** (user, 2026-11-09: conical cup; filter under the sprue): a pouring cup is a cone
+    cut into the top of the cope (top diameter and height typed, bottom = the sprue's top, butt-joined; its
+    open top is now the pouring inlet). A sprue well (diameter, depth below the runners typed) hangs under
+    the sprue, and the runners drop from it; a filter (square or round, size and thickness typed) lies on
+    the parting plane over the well, the sprue coming down onto it. New joint `stack` (straight down the
+    axis, sections may differ). The filter and well have no embed, so the filter's region is exactly the
+    filter. All the heights are kept by `workflow.sync`.
+49. **Feeders and vents** (user: top and side feeders; round vents from the part): closed round feeders in
+    the cope, on the part's top where clicked (its height there found by a ray) or on the parting plane
+    beside the part with a neck (width, thickness, cope/drag) running to where it first touches the part;
+    vents from the part's top straight up to the box top. Each joins the part by a `gate` joint. Region
+    kinds `feeder.<id>` and `vent.<id>` (metal) and `filter.<id>` (porous): the element contract now allows
+    these besides `gating.<id>`.
+50. **Filters in the simulation**: ayrton-solid's `validation/stl_case.py` reads `regions/manifest.json`
+    and voxelizes every `filter` region into the case's filter cells (the solver's ceramic foam).

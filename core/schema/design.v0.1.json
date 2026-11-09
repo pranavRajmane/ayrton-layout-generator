@@ -459,6 +459,7 @@
               "drop",
               "tee",
               "gate",
+              "stack",
               "transition",
               "branch",
               "part",

@@ -15,6 +15,8 @@
   part        the outlet section must sit on the picked part face (contact
               patch) and runs embed into the part (penetration)
   blind       a dead end: nothing may flow on out of the downstream element
+  stack       one element straight on another down the sprue's axis (sprue,
+              filter, well): the frames coincide, the sections may differ
   tee         a path element (an ingate) drawn from a point on another element
               (a runner) at the parting plane: its start must lie on that
               element; the upstream element keeps the overlap
@@ -132,7 +134,9 @@ def _check_tee(c, a, b, issues) -> None:
                                       instances=(a.instance, b.instance), connection=c.id))
         return
     s = b.element.points(b.params)[0]
-    d = _gap(Vertex(float(s[0]), float(s[1]), float(s[2])), a.solid)
+    from build123d import Vector
+    inside = a.solid.is_inside(Vector(float(s[0]), float(s[1]), float(s[2])), tolerance=1e-3)
+    d = 0.0 if inside else _gap(Vertex(float(s[0]), float(s[1]), float(s[2])), a.solid)
     if d > GAP_MM:
         issues.append(ValidationIssue("joint.tee_off", Severity.ERROR,
                                       f"{b.instance} starts {d:.1f} mm away from {a.instance}",
