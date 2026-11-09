@@ -1,0 +1,40 @@
+{
+  "id": "no_bake_steel",
+  "process": "no_bake",
+  "alloy": "steel",
+  "density_kg_m3": null,
+  "viscosity_pa_s": null,
+  "pouring_temp_c": {
+    "default": null,
+    "min": null,
+    "max": null
+  },
+  "shrinkage_pct": null,
+  "discharge_coefficient": null,
+  "pour_time_formula": null,
+  "gating_ratios": {
+    "default": [
+      null,
+      null,
+      null
+    ],
+    "options": {
+      "pressurized": [
+        null,
+        null,
+        null
+      ],
+      "unpressurized": [
+        null,
+        null,
+        null
+      ]
+    }
+  },
+  "limits": {
+    "max_ingate_velocity_m_s": null,
+    "max_runner_velocity_m_s": null,
+    "max_joint_angle_deg": null
+  },
+  "source": "TODO: the reference these values come from"
+}

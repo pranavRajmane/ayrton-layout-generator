@@ -1,0 +1,25 @@
+[project]
+name = "ayrton-gating"
+version = "0.0.1"
+description = "Gating-design CAD module for Ayrton: element framework, regeneration, solver bridge"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "build123d>=0.13",
+    "numpy",
+    "jsonschema",
+    "jsonpatch",
+    "fastapi",
+    "uvicorn[standard]",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "httpx"]
+
+[tool.setuptools.packages.find]
+include = ["core*", "elements*", "calculators*", "rules*", "bridge*", "api*"]
+
+[tool.setuptools.package-data]
+core = ["schema/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

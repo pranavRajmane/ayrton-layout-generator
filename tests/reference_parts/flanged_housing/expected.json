@@ -1,0 +1,29 @@
+{
+  "part_volume_mm3": 916057.0018602477,
+  "part_bbox": [
+    [
+      -100,
+      -100,
+      0
+    ],
+    [
+      100,
+      100,
+      100
+    ]
+  ],
+  "regions": [
+    "part",
+    "gating.sprue_1"
+  ],
+  "metal_volume_mm3": 948057.0018602477,
+  "inlet_centre": [
+    69.2820323027551,
+    39.99999999999999,
+    95.0
+  ],
+  "measurement_planes": [
+    "sprue_1.inlet",
+    "sprue_1.outlet"
+  ]
+}

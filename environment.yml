@@ -1,0 +1,7 @@
+# conda env create -f environment.yml && conda activate ayrton-gating && pip install -e ".[dev]"
+# Python 3.12: OCCT wheels (cadquery-ocp, under build123d) do not cover 3.14.
+name: ayrton-gating
+channels: [conda-forge]
+dependencies:
+  - python=3.12
+  - pip

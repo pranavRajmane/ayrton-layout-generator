@@ -1,0 +1,550 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ayrton.noetherlabs.com/schema/design.v0.1.json",
+  "title": "Ayrton gating design document",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "name",
+    "units",
+    "part",
+    "mold",
+    "process",
+    "elements",
+    "connections",
+    "variants"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1"
+    },
+    "name": {
+      "type": "string"
+    },
+    "units": {
+      "type": "object",
+      "properties": {
+        "length": {
+          "const": "mm"
+        },
+        "mass": {
+          "const": "kg"
+        },
+        "time": {
+          "const": "s"
+        },
+        "temperature": {
+          "const": "degC"
+        }
+      },
+      "required": [
+        "length",
+        "mass",
+        "time",
+        "temperature"
+      ],
+      "additionalProperties": false
+    },
+    "part": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "required": [
+            "source"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "source": {
+              "type": "string",
+              "description": "STEP or STL path, relative to the document"
+            },
+            "transform": {
+              "$ref": "#/$defs/transform",
+              "description": "part frame -> mold frame"
+            },
+            "ports": {
+              "type": "array",
+              "description": "Picked part faces where ingates attach; normal is the flow direction, into the part",
+              "items": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "frame"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "$ref": "#/$defs/id"
+                  },
+                  "frame": {
+                    "$ref": "#/$defs/frame"
+                  },
+                  "face": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "index of the picked face in the source part"
+                  }
+                }
+              }
+            },
+            "cores": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "id"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "$ref": "#/$defs/id"
+                  },
+                  "source": {
+                    "type": "string"
+                  },
+                  "transform": {
+                    "$ref": "#/$defs/transform"
+                  },
+                  "primitive": {
+                    "type": "object",
+                    "required": [
+                      "shape",
+                      "frame",
+                      "d",
+                      "length"
+                    ],
+                    "additionalProperties": false,
+                    "description": "a cylindrical core with its prints: axis along frame.normal, centred on frame.origin (part frame)",
+                    "properties": {
+                      "shape": {
+                        "const": "cylinder"
+                      },
+                      "frame": {
+                        "$ref": "#/$defs/frame"
+                      },
+                      "d": {
+                        "type": "number",
+                        "exclusiveMinimum": 0
+                      },
+                      "length": {
+                        "type": "number",
+                        "exclusiveMinimum": 0
+                      }
+                    }
+                  }
+                },
+                "oneOf": [
+                  {
+                    "required": [
+                      "source"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "primitive"
+                    ]
+                  }
+                ]
+              }
+            },
+            "units": {
+              "enum": [
+                "auto",
+                "mm",
+                "cm",
+                "m",
+                "inch"
+              ],
+              "description": "units of the source file; auto: STEP's own, mm for STL (with a size warning)"
+            },
+            "shrinkage_pct": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "description": "pattern scale-up; null: the process preset's value"
+            },
+            "machining": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "faces",
+                  "allowance_mm"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "$ref": "#/$defs/id"
+                  },
+                  "faces": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "allowance_mm": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  }
+                }
+              }
+            },
+            "cavities": {
+              "type": "array",
+              "description": "more parts in the mold. Without source: a copy of the part, transform = a rigid move of the placed part in the mold frame. With source: another part file, transform = its own placement (its file frame to the mold frame)",
+              "items": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "transform"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "$ref": "#/$defs/id"
+                  },
+                  "transform": {
+                    "$ref": "#/$defs/transform"
+                  },
+                  "source": {
+                    "type": "string",
+                    "description": "another part file (STEP or STL), relative to the design file"
+                  },
+                  "units": {
+                    "enum": [
+                      "auto",
+                      "mm",
+                      "cm",
+                      "m",
+                      "inch"
+                    ]
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "mold": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "flask": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "margin_mm": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "description": "sand around the part bounding box on every side"
+                },
+                "size_mm": {
+                  "$ref": "#/$defs/vec3"
+                },
+                "centre": {
+                  "$ref": "#/$defs/vec3",
+                  "description": "with size_mm: the flask centre in the mold frame"
+                }
+              }
+            }
+          ]
+        },
+        "draft_min_deg": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "smallest acceptable draft; null: not checked"
+        }
+      }
+    },
+    "process": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "process": {
+          "enum": [
+            "green_sand",
+            "no_bake",
+            null
+          ]
+        },
+        "alloy": {
+          "enum": [
+            "grey_iron",
+            "sg_iron",
+            "steel",
+            null
+          ]
+        },
+        "preset": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "gating_system": {
+          "enum": [
+            "pressurized",
+            "unpressurized",
+            null
+          ]
+        },
+        "section_thickness_mm": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "exclusiveMinimum": 0,
+          "description": "governing section thickness t for the pour-time formula"
+        },
+        "pour_time_s": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "exclusiveMinimum": 0,
+          "description": "set to override the preset's pour-time formula"
+        },
+        "basin_head_mm": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "metal height in the pouring basin above the pouring inlet"
+        },
+        "head_method": {
+          "enum": [
+            "top",
+            "bottom",
+            "parting",
+            null
+          ],
+          "description": "effective metal head: top H; bottom H - C/2; parting H - P^2/(2C)"
+        }
+      }
+    },
+    "elements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "params"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/id",
+            "not": {
+              "enum": [
+                "part"
+              ]
+            }
+          },
+          "type": {
+            "$ref": "#/$defs/id"
+          },
+          "type_version": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "params": {
+            "type": "object"
+          },
+          "anchor": {
+            "type": "object",
+            "description": "Fixes the element in the mold frame: the named port (or, without one, the local frame) lands on frame",
+            "required": [
+              "frame"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "port": {
+                "type": "string"
+              },
+              "frame": {
+                "$ref": "#/$defs/frame"
+              }
+            }
+          }
+        }
+      }
+    },
+    "connections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "from",
+          "to",
+          "joint"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/id"
+          },
+          "from": {
+            "type": "object",
+            "required": [
+              "instance",
+              "port"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "instance": {
+                "type": "string"
+              },
+              "port": {
+                "type": "string"
+              },
+              "station": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "side": {
+                "enum": [
+                  "top",
+                  "bottom",
+                  "side"
+                ]
+              }
+            }
+          },
+          "to": {
+            "type": "object",
+            "required": [
+              "instance",
+              "port"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "instance": {
+                "type": "string"
+              },
+              "port": {
+                "type": "string"
+              }
+            }
+          },
+          "joint": {
+            "enum": [
+              "butt",
+              "drop",
+              "tee",
+              "gate",
+              "transition",
+              "branch",
+              "part",
+              "blind"
+            ]
+          },
+          "overlap_mm": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "transition": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "measure_plane": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "variants": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "vec3": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "frame": {
+      "type": "object",
+      "required": [
+        "origin",
+        "normal",
+        "up"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "origin": {
+          "$ref": "#/$defs/vec3"
+        },
+        "normal": {
+          "$ref": "#/$defs/vec3"
+        },
+        "up": {
+          "$ref": "#/$defs/vec3"
+        }
+      }
+    },
+    "transform": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "rotation": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 3,
+            "maxItems": 3
+          }
+        },
+        "translation": {
+          "$ref": "#/$defs/vec3"
+        }
+      }
+    }
+  }
+}

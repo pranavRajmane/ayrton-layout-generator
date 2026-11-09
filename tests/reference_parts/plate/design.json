@@ -1,0 +1,73 @@
+{
+  "schema_version": "0.1",
+  "name": "Plate",
+  "units": {
+    "length": "mm",
+    "mass": "kg",
+    "time": "s",
+    "temperature": "degC"
+  },
+  "part": {
+    "source": "plate.step",
+    "ports": [
+      {
+        "id": "gate_face",
+        "frame": {
+          "origin": [
+            0,
+            0,
+            10
+          ],
+          "normal": [
+            0,
+            0,
+            -1
+          ],
+          "up": [
+            1,
+            0,
+            0
+          ]
+        }
+      }
+    ]
+  },
+  "mold": {
+    "flask": null
+  },
+  "process": {
+    "process": null,
+    "alloy": null,
+    "preset": null
+  },
+  "elements": [
+    {
+      "id": "sprue_1",
+      "type": "dummy_box",
+      "type_version": "0.1",
+      "params": {
+        "length": 80.0,
+        "width": 20.0,
+        "height": 20.0
+      }
+    }
+  ],
+  "connections": [
+    {
+      "id": "c1",
+      "from": {
+        "instance": "sprue_1",
+        "port": "outlet"
+      },
+      "to": {
+        "instance": "part",
+        "port": "gate_face"
+      },
+      "joint": "part",
+      "overlap_mm": null,
+      "transition": null,
+      "measure_plane": true
+    }
+  ],
+  "variants": []
+}
