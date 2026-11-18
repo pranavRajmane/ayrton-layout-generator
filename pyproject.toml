@@ -6,6 +6,7 @@ requires-python = ">=3.11,<3.14"
 dependencies = [
     "build123d>=0.13",
     "numpy",
+    "scipy",
     "jsonschema",
     "jsonpatch",
     "fastapi",
@@ -16,10 +17,11 @@ dependencies = [
 dev = ["pytest", "httpx"]
 
 [tool.setuptools.packages.find]
-include = ["core*", "elements*", "calculators*", "rules*", "bridge*", "api*"]
+include = ["core*", "elements*", "calculators*", "rules*", "bridge*", "api*", "seeds*"]
 
 [tool.setuptools.package-data]
 core = ["schema/*.json"]
+seeds = ["knobs.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

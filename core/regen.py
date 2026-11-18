@@ -298,12 +298,13 @@ def regenerate(doc: DesignDocument, registry: Registry = REGISTRY) -> RegenResul
             solids.update({"part": res.part.shape, **{f"part.{k}": v for k, v in res.part.cavities.items()}})
         # an element may poke out by its embed (the pouring stub over the cope top, trimmed on export)
         tol = {i: b.params.embed for i, b in res.built.items()}
-        issues.extend(mold.outside_flask(res.flask, solids, tol))
+        boxes = {n: res.part.bbox_of(n) for n in res.part.placed} if res.part is not None else {}
+        issues.extend(mold.outside_flask(res.flask, solids, tol, boxes))
     if res.part is not None and res.part.cavities:
         names = {"part": res.part.path.name, **{f"part.{c['id']}": c.get("name") or f"{res.part.path.name} ({c['id']})"
                                                 for c in (data["part"] or {}).get("cavities", [])}}
         issues.extend(mold.parts_overlap({"part": res.part.shape, **{f"part.{k}": v for k, v in res.part.cavities.items()}},
-                                         names))
+                                         names, {n: res.part.bbox_of(n) for n in res.part.placed}, res.part.key))
     res.timings_ms["total"] = 1e3 * (time.perf_counter() - t0)
     return res
 

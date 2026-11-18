@@ -20,6 +20,9 @@ class Vent(Element):
         Param("d", unit="mm", default=10.0, min=0.5, max=200.0, label="diameter"),
         Param("length", unit="mm", default=100.0, min=0.5, max=5000.0,
               description="from the part to the top of the box (set from them)"),
+        Param("embed", unit="mm", default=1.0, min=0.0, max=2000.0,
+              description="how far it reaches down into the part below its base: 1 mm on a flat top, more "
+                          "where the top falls away under it (set when it is placed)"),
     ]
 
     # Local frame: its axis along +X (straight up once placed) from the part at the origin.

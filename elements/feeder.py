@@ -21,6 +21,9 @@ class Feeder(Element):
         Param("kind", choices=("top", "side"), default="top"),
         Param("d", unit="mm", default=60.0, min=1.0, max=1000.0, label="diameter"),
         Param("height", unit="mm", default=90.0, min=1.0, max=2000.0),
+        Param("embed", unit="mm", default=1.0, min=0.0, max=2000.0,
+              description="how far it reaches down into the part below its base: 1 mm on a flat top, more "
+                          "where the top falls away under it (set when it is placed)"),
     ]
 
     # Local frame: its axis along +X (straight up once placed) from its base at the origin.

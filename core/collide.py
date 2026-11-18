@@ -9,10 +9,13 @@ both sides.
 """
 from __future__ import annotations
 
+import hashlib
 from itertools import combinations
 
+import numpy as np
+
 from core.element import Severity, ValidationIssue
-from core.occ import boxes_touch, common_volume
+from core.occ import boxes_touch, common_volume_cached
 
 VOLUME_TOL = 1.0            # mm3
 
@@ -21,6 +24,8 @@ def check(res) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     items = {i: b.solid for i, b in res.built.items()}
     items.update({t.connection: t.solid for t in res.transitions.values()})
+    keys = {i: solid_key(b) for i, b in res.built.items()}
+    keys.update({t.connection: _transition_key(t) for t in res.transitions.values()})
     allowed = set()
     part_allow: dict[str, float] = {}
     for c in res.graph.connections:
@@ -47,25 +52,26 @@ def check(res) -> list[ValidationIssue]:
     for sibs in drops.values():
         allowed.update(frozenset(p) for p in combinations(sibs, 2))
 
-    def overlap(a, b) -> float:
-        if not boxes_touch(a, b):
+    def overlap(a, b, key, a_box=None, b_box=None) -> float:
+        if not boxes_touch(a if a_box is None else a_box, b if b_box is None else b_box):
             return 0.0
         try:
-            return common_volume(a, b)
+            return common_volume_cached(key, a, b)
         except Exception:                                        # noqa: BLE001
             return 0.0
 
     for x, y in combinations(sorted(items), 2):
         if frozenset((x, y)) in allowed:
             continue
-        v = overlap(items[x], items[y])
+        v = overlap(items[x], items[y], (keys[x], keys[y]))
         if v > VOLUME_TOL:
             issues.append(ValidationIssue("collision.gating", Severity.ERROR, f"{x} and {y} overlap by {v:.1f} mm3",
                                           value=round(v, 2), limit=VOLUME_TOL, instances=(x, y)))
     if res.part is None:
         return issues
+    metal, metal_box = res.part.metal, res.part.bbox     # the part's box from its mesh: exact takes seconds
     for x, s in items.items():
-        v = overlap(s, res.part.metal)
+        v = overlap(s, metal, (keys[x], "part", res.part.key), b_box=metal_box)
         lim = part_allow.get(x, 0.0) + VOLUME_TOL
         if v > lim:
             issues.append(ValidationIssue("collision.part", Severity.ERROR,
@@ -73,9 +79,19 @@ def check(res) -> list[ValidationIssue]:
                                           (f" (its part joint allows {lim:.1f})" if x in part_allow else ""),
                                           value=round(v, 2), limit=round(lim, 2), instances=(x,)))
         for k, core in res.part.cores.items():
-            v = overlap(s, core)
+            v = overlap(s, core, (keys[x], "core", k, res.part.key))
             if v > VOLUME_TOL:
                 issues.append(ValidationIssue("collision.core", Severity.ERROR,
                                               f"{x} crosses core '{k}' ({v:.1f} mm3)", value=round(v, 2),
                                               limit=VOLUME_TOL, instances=(x,)))
     return issues
+
+
+def solid_key(b) -> str:
+    """What decides a built element's solid: its type and version, parameters and placement."""
+    return hashlib.sha1(f"{b.type}:{b.element.version}:{sorted(b.params.items())}:"
+                        f"{np.round(b.transform, 9).tobytes().hex()}".encode()).hexdigest()
+
+
+def _transition_key(t) -> str:
+    return hashlib.sha1(f"{t.connection}:{t.solid.volume:.9f}:{tuple(t.solid.center())}".encode()).hexdigest()

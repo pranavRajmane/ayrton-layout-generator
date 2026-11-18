@@ -27,7 +27,9 @@ function ParamInput({ p, value, onCommit }: { p: ParamSchema; value: unknown; on
     );
   }
   const commit = () => {
-    const v = p.type === "float" || p.type === "int" ? Number(text) : text;
+    const numeric = p.type === "float" || p.type === "int";
+    // an empty number field is not 0: it goes back to the value it had
+    const v = numeric ? (text.trim() === "" ? NaN : Number(text)) : text;
     if (v !== value && !(typeof v === "number" && Number.isNaN(v))) onCommit(v);
     else setText(String(value));
   };
@@ -109,7 +111,8 @@ export default function App() {
   const [state, setState] = useState<DesignState | null>(null);
   const [types, setTypes] = useState<Record<string, ElementType>>({});
   const [selected, setSelected] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busyN, setBusyN] = useState(0);           // actions queued or running
+  const busy = busyN > 0;
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("setup");
@@ -119,33 +122,57 @@ export default function App() {
   const [presets, setPresets] = useState<string[]>([]);
   const [showNotes, setShowNotes] = useState(false);
   const opened = useRef<string | null>(null);
+  const queue = useRef<Promise<unknown>>(Promise.resolve());
+  const serverNote = useRef(false);                  // the note shown is the state's notes
 
-  const run = useCallback(async (f: () => Promise<DesignState | void>) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const s = await f();
-      if (s) {
-        setState(s);
-        if (s.path) opened.current = s.path;
-      }
-    } catch (e) {
-      const msg = String((e as Error).message);
-      if (msg.startsWith("no design session") && opened.current) {
-        // the API restarted and forgot the session: start again from the file
-        try {
-          setState(await api.open(opened.current));
-          setNote("The API restarted, so the design was reopened from its file; unsaved edits are lost.");
-        } catch (e2) {
-          setError(String((e2 as Error).message));
-        }
-      } else {
-        setError(msg);
-      }
-    } finally {
-      setBusy(false);
+  /** a new state from the API; its notes (about the last action) are shown like any note */
+  const take = useCallback((s: DesignState) => {
+    setState(s);
+    if (s.path) opened.current = s.path;
+    if (s.notes?.length) {
+      setNote(s.notes.join("\n"));
+      serverNote.current = true;
+    } else if (serverNote.current) {
+      setNote(null);
+      serverNote.current = false;
     }
   }, []);
+  const say = useCallback((text: string | null) => {
+    setNote(text);
+    serverNote.current = false;
+  }, []);
+
+  /** One action against the API. Actions run one after another, never overlapping: each starts
+   * only when the one before has finished (and its state has been taken). True if it worked. */
+  const run = useCallback((f: () => Promise<DesignState | void>): Promise<boolean> => {
+    setBusyN((n) => n + 1);
+    const job = queue.current.then(async () => {
+      setError(null);
+      try {
+        const s = await f();
+        if (s) take(s);
+        return true;
+      } catch (e) {
+        const msg = String((e as Error).message);
+        if (msg.startsWith("no design session") && opened.current) {
+          // the API restarted and forgot the session: start again from the file
+          try {
+            take(await api.open(opened.current));
+            say("The API restarted, so the design was reopened from its file; unsaved edits are lost.");
+          } catch (e2) {
+            setError(String((e2 as Error).message));
+          }
+        } else {
+          setError(msg);
+        }
+        return false;
+      } finally {
+        setBusyN((n) => n - 1);
+      }
+    });
+    queue.current = job;
+    return job;
+  }, [take, say]);
 
   useEffect(() => {
     api.elementTypes().then((ts) => setTypes(Object.fromEntries(ts.map((t) => [t.id, t])))).catch((e) => setError(String(e)));
@@ -166,7 +193,7 @@ export default function App() {
       setPath(p);
       return api.newFromPart(p);
     });
-  const setup = useSetup(state, run, setPlan);
+  const setup = useSetup(state, run, setPlan, { active: tab === "setup", busy });
   const el = state?.elements.find((e) => e.instance === selected) ?? null;
   const elIndex = state?.elements.findIndex((e) => e.instance === selected) ?? -1;
   const setParam = (name: string, v: unknown) => {
@@ -190,7 +217,7 @@ export default function App() {
       run(async () => {
         const pk = await api.pick(state.id, pt);
         setPicked(pk.mesh);
-        setNote(`face ${pk.face}: ${pk.kind}, ${pk.area_mm2.toFixed(0)} mm², normal ${pk.normal.map((v) => v.toFixed(2)).join(", ")}`);
+        say(`face ${pk.face}: ${pk.kind}, ${pk.area_mm2.toFixed(0)} mm², normal ${pk.normal.map((v) => v.toFixed(2)).join(", ")}`);
       });
     }
   };
@@ -232,7 +259,7 @@ export default function App() {
           disabled={!state || busy}
           onClick={() => {
             const out = prompt("Export folder (Ayrton project + regions)", "out/export");
-            if (state && out) run(async () => setNote(`exported: ${(await api.exportTo(state.id, out)).metal.volume_mm3.toFixed(0)} mm³ of metal`));
+            if (state && out) run(async () => say(`exported: ${(await api.exportTo(state.id, out)).metal.volume_mm3.toFixed(0)} mm³ of metal`));
           }}
         >
           Export to Ayrton
@@ -259,7 +286,7 @@ export default function App() {
           <button className="link" onClick={() => setDismissed(true)}>OK</button>
         </div>
       )}
-      {note && <div className="note" onClick={() => setNote(null)}>{note}</div>}
+      {note && <div className="note" onClick={() => say(null)}>{note}</div>}
       <aside className="tree">
         <h3>{state?.document.name ?? "No design"}</h3>
         {state?.part && (
@@ -288,6 +315,7 @@ export default function App() {
         ))}
       </aside>
       <main>
+        {busy && state && <div className="busyveil">working…</div>}
         {mode !== "none" && <div className="mode">{mode === "gate" ? "Click the part where an ingate should land" : "Click the face that should face down"}</div>}
         {state && (
           <Viewer state={state} selected={selected} onSelect={(i) => { setSelected(i); setPicked(null); if (i) setTab("element"); }}

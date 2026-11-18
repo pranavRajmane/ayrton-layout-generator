@@ -1,5 +1,5 @@
 // Right-hand panels: part and mold setup, process inputs, calculators, and building the gating graph.
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api, type DesignState, type ElementType, type FaceCheck, type Vec3 } from "./api";
 
 type Run = (f: () => Promise<DesignState | void>) => void;
@@ -9,6 +9,7 @@ const n = (v: unknown, d = 2) => (typeof v === "number" ? (Math.abs(v) >= 1e5 ? 
 
 function Num({ label, value, unit, onCommit }: { label: string; value: number | null | undefined; unit?: string; onCommit: (v: number | null) => void }) {
   const [t, setT] = useState(value == null ? "" : String(value));
+  useEffect(() => setT(value == null ? "" : String(value)), [value]);     // undo, redo, another edit
   const commit = () => {
     const v = t.trim() === "" ? null : Number(t);
     if (v !== value && !(typeof v === "number" && Number.isNaN(v))) onCommit(v);

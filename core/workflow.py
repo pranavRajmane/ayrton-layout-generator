@@ -57,7 +57,8 @@ def box_patch(doc, length: float, width: float, height: float, parting: float | 
     return [{"op": "replace", "path": "/mold/flask", "value": flask}]
 
 
-def fit_patch(doc, move, length: float, width: float, height: float, parting: float, shift=(0, 0, 0)) -> list[dict]:
+def fit_patch(doc, move, length: float, width: float, height: float, parting: float, shift=(0, 0, 0),
+              carry=()) -> list[dict]:
     """A suggested fit as one undo step: the box, and the part moved into it (move: the suggestion's
     4x4 from where the part is now, then shifted, e.g. to leave the sprue's room at one end)."""
     m = np.asarray(move, float)
@@ -65,7 +66,7 @@ def fit_patch(doc, move, length: float, width: float, height: float, parting: fl
         raise WorkflowError("a fit's move is a 4x4 matrix")
     t = np.eye(4)
     t[:3, 3] = np.asarray(shift, float)
-    return box_patch(doc, length, width, height, parting) + _move_part(doc, t @ m, None)
+    return box_patch(doc, length, width, height, parting) + _move_part(doc, t @ m, None, carry)
 
 
 def _cavity(data: dict, cid: str) -> tuple[int, dict]:
@@ -75,26 +76,60 @@ def _cavity(data: dict, cid: str) -> tuple[int, dict]:
     raise WorkflowError(f"no part '{cid}' in the box")
 
 
-def _move_part(doc, d: np.ndarray, cavity: str | None, follow=None) -> list[dict]:
+def _move_part(doc, d: np.ndarray, cavity: str | None, carry=()) -> list[dict]:
     """Patch for the world move d (4x4, rigid) of one part in the box; every other part stays put.
-    follow: the part's footprint before the move ((xmin, ymin), (xmax, ymax)): ingates drawn by hand
-    that end on it move their end with it (automatic ones are placed again from their runners)."""
+    carry: what sits on that part (from contacts() and the part geometry): top feeders and vents, side
+    feeders with their necks, and the ends of ingates drawn by hand move with it (automatic ingates are
+    placed again from their runners; feeders and vents are seated again on the moved part)."""
     data = doc.data
-    ops = _follow(data, d, follow) if follow is not None else []
-    return ops + _move_only(doc, d, cavity)
+    return _follow(data, d, set(carry)) + _move_only(doc, d, cavity)
 
 
-def _follow(data: dict, d: np.ndarray, foot) -> list[dict]:
-    (x0, y0), (x1, y1) = foot
+def _xy(d: np.ndarray, q) -> list[float]:
+    m = (d @ np.array([q[0], q[1], q[2] if len(q) > 2 else 0.0, 1.0]))[:3]
+    return [float(m[0]), float(m[1]), 0.0]
+
+
+def _follow(data: dict, d: np.ndarray, carry: set[str]) -> list[dict]:
     out = []
     for i, e in enumerate(data["elements"]):
-        if e["type"] != "ingate" or e["params"].get("placed") == "auto":
+        if e["id"] not in carry:
             continue
-        end = e["params"]["waypoints"][-1]
-        if x0 - 2 <= end[0] <= x1 + 2 and y0 - 2 <= end[1] <= y1 + 2:
-            moved = (d @ np.array([end[0], end[1], end[2] if len(end) > 2 else 0.0, 1.0]))[:3]
-            out.append({"op": "replace", "path": f"/elements/{i}/params/waypoints/{len(e['params']['waypoints']) - 1}",
-                        "value": [float(moved[0]), float(moved[1]), 0.0]})
+        if e["type"] == "ingate":
+            n = len(e["params"]["waypoints"]) - 1
+            out.append({"op": "replace", "path": f"/elements/{i}/params/waypoints/{n}",
+                        "value": _xy(d, e["params"]["waypoints"][n])})
+        elif e["type"] == "neck":                            # on the plane, both ends with its feeder
+            out.append({"op": "replace", "path": f"/elements/{i}/params/waypoints",
+                        "value": [_xy(d, q) for q in e["params"]["waypoints"]]})
+        elif e.get("anchor"):
+            o = e["anchor"]["frame"]["origin"]
+            if e["type"] == "feeder" and e["params"].get("kind") == "side":
+                o2 = _xy(d, o)                               # stands on the parting plane
+            else:
+                o2 = [float(v) for v in (d @ np.array([*o, 1.0]))[:3]]
+            out.append({"op": "replace", "path": f"/elements/{i}/anchor/frame/origin", "value": o2})
+    return out
+
+
+def contacts(data: dict) -> list[tuple[set[str], list[float]]]:
+    """What sits on a part, and where it touches it: (ids that move together, contact point) for every
+    top feeder and vent (its base), side feeder (with its neck, at the neck's end) and ingate drawn by
+    hand (its end). Which part each touches is for the caller to find from the geometry."""
+    out = []
+    els = {e["id"]: e for e in data["elements"]}
+    tee = {c["from"]["instance"]: c["to"]["instance"] for c in data["connections"] if c["joint"] == "tee"}
+    for e in data["elements"]:
+        p = e["params"]
+        if e["type"] in ("vent", "feeder") and e.get("anchor"):
+            if e["type"] == "feeder" and p.get("kind") == "side":
+                neck = els.get(tee.get(e["id"], ""))
+                if neck is not None and neck["type"] == "neck":
+                    out.append(({e["id"], neck["id"]}, list(neck["params"]["waypoints"][-1])))
+            else:
+                out.append(({e["id"]}, list(e["anchor"]["frame"]["origin"])))
+        elif e["type"] == "ingate" and p.get("placed") != "auto":
+            out.append(({e["id"]}, list(p["waypoints"][-1])))
     return out
 
 
@@ -114,30 +149,26 @@ def _move_only(doc, d: np.ndarray, cavity: str | None) -> list[dict]:
     return ops
 
 
-def _foot(bbox):
-    return None if bbox is None else ((bbox[0][0], bbox[0][1]), (bbox[1][0], bbox[1][1]))
-
-
-def move_part_patch(doc, delta, cavity: str | None = None, bbox=None) -> list[dict]:
+def move_part_patch(doc, delta, cavity: str | None = None, carry=()) -> list[dict]:
     d = np.eye(4)
     d[:3, 3] = np.asarray(delta, float)
-    return _move_part(doc, d, cavity, _foot(bbox))
+    return _move_part(doc, d, cavity, carry)
 
 
-def turn_part_patch(doc, axis, angle_deg: float, centre, cavity: str | None = None, bbox=None) -> list[dict]:
+def turn_part_patch(doc, axis, angle_deg: float, centre, cavity: str | None = None, carry=()) -> list[dict]:
     """Turn one part about an axis through its own centre."""
     r = orient.rotation(axis, angle_deg)
     c = np.asarray(centre, float)
     d = np.eye(4)
     d[:3, :3], d[:3, 3] = r, c - r @ c
-    return _move_part(doc, d, cavity, _foot(bbox))
+    return _move_part(doc, d, cavity, carry)
 
 
-def centre_part_patch(doc, part_bbox, cavity: str | None = None) -> list[dict]:
+def centre_part_patch(doc, part_bbox, cavity: str | None = None, carry=()) -> list[dict]:
     """Move a part so its bounding box is centred on the box axis, half above and
     half below the parting plane."""
     lo, hi = np.asarray(part_bbox[0], float), np.asarray(part_bbox[1], float)
-    return move_part_patch(doc, -(lo + hi) / 2, cavity, part_bbox)
+    return move_part_patch(doc, -(lo + hi) / 2, cavity, carry)
 
 
 def add_copy_patch(doc, of: str | None, offset) -> list[dict]:
@@ -174,9 +205,19 @@ def _add_cavity(data: dict, new: dict) -> list[dict]:
     return [{"op": "add", "path": "/part/cavities/-", "value": new}]
 
 
-def remove_part_patch(doc, cavity: str) -> list[dict]:
+def remove_part_patch(doc, cavity: str, on_it=()) -> list[dict]:
+    """A part (not the main one) out of the box, with what sits on it (on_it: ids from contacts(), its
+    feeders, vents and hand-drawn ingates, and what hangs off them)."""
     i, _ = _cavity(doc.data, cavity)
-    return [{"op": "remove", "path": f"/part/cavities/{i}"}]
+
+    def fn(d):
+        gone = set()
+        for inst in on_it:
+            if _index(d, inst) is not None:
+                gone |= _fed_by(d, inst)
+        _remove(d, gone)
+        d["part"]["cavities"].pop(i)
+    return _edit(doc, fn)
 
 
 # ---- sprue and runner ---------------------------------------------------------------
@@ -297,7 +338,7 @@ def _up(x: float, y: float, z: float, port: str = "base") -> dict:
 
 
 def feeder_patch(doc, kind: str, x: float, y: float, z: float, d: float, height: float,
-                 neck: dict | None = None) -> list[dict]:
+                 neck: dict | None = None, embed: float | None = None) -> list[dict]:
     """A top feeder standing on the part at (x, y, z), or a side feeder standing on the parting plane at
     (x, y) with its neck {width, thickness, side, end} running from it to the part's edge at end."""
     data = doc.data
@@ -313,7 +354,8 @@ def feeder_patch(doc, kind: str, x: float, y: float, z: float, d: float, height:
 
     def fn(dd):
         dd["elements"].append({"id": fid, "type": "feeder", "type_version": "0.1", "name": fid,
-                               "params": {"kind": kind, "d": float(d), "height": float(height)},
+                               "params": {"kind": kind, "d": float(d), "height": float(height),
+                                          **({"embed": float(embed)} if embed is not None and kind == "top" else {})},
                                "anchor": _up(x, y, z if kind == "top" else 0.0)})
         if kind == "top":
             dd["connections"].append({"id": next_id(cids, "gate"), "from": {"instance": fid, "port": "base"},
@@ -334,7 +376,7 @@ def feeder_patch(doc, kind: str, x: float, y: float, z: float, d: float, height:
     return _edit(doc, fn)
 
 
-def vent_patch(doc, x: float, y: float, z: float, d: float) -> list[dict]:
+def vent_patch(doc, x: float, y: float, z: float, d: float, embed: float | None = None) -> list[dict]:
     """A round vent from the part at (x, y, z) straight up to the top of the box."""
     data = doc.data
     b = box(data)
@@ -350,10 +392,69 @@ def vent_patch(doc, x: float, y: float, z: float, d: float) -> list[dict]:
 
     def fn(dd):
         dd["elements"].append({"id": vid, "type": "vent", "type_version": "0.1", "name": vid,
-                               "params": {"d": float(d), "length": b["top"] - float(z)}, "anchor": _up(x, y, z)})
+                               "params": {"d": float(d), "length": b["top"] - float(z),
+                                          **({"embed": float(embed)} if embed is not None else {})},
+                               "anchor": _up(x, y, z)})
         dd["connections"].append({"id": next_id(cids, "gate"), "from": {"instance": vid, "port": "base"},
                                   "to": {"instance": "part", "port": "gate"}, "joint": "gate"})
     return _edit(doc, fn)
+
+
+def seat_patch(doc, inst: str, z: float, embed: float) -> list[dict]:
+    """A top feeder or vent seated again (after its part moved): its base at height z, reaching embed
+    into the part; a vent still runs to the top of the box."""
+    data = doc.data
+    i = _index(data, inst)
+    if i is None:
+        raise WorkflowError(f"no element '{inst}'")
+    e = data["elements"][i]
+    o = e["anchor"]["frame"]["origin"]
+    params = {**e["params"], "embed": float(embed)}
+    if e["type"] == "vent":
+        b = box(data)
+        if b is None or z >= b["top"]:
+            raise WorkflowError(f"{inst}: the part reaches the top of the box there")
+        params["length"] = b["top"] - float(z)
+    return [{"op": "replace", "path": f"/elements/{i}/anchor/frame/origin", "value": [o[0], o[1], float(z)]},
+            {"op": "replace", "path": f"/elements/{i}/params", "value": params}]
+
+
+def neck_end(outline: list, x: float, y: float, d: float, width: float, toward=None) -> list[float]:
+    """Where a side feeder's neck, from the feeder standing at (x, y), meets the part: straight toward
+    `toward` (x, y) when given, else toward the nearest point of the part's outline."""
+    pts = np.array([q for line in outline for q in line], float)
+    if not len(pts):
+        raise WorkflowError("the part does not reach the parting plane here")
+    if toward is None:
+        q = pts[np.argmin(np.hypot(pts[:, 0] - x, pts[:, 1] - y))]
+        dist = float(np.hypot(q[0] - x, q[1] - y))
+        if dist < d / 2:
+            raise WorkflowError("the feeder stands on the part: move it beside the part")
+        u = (q[:2] - (x, y)) / dist
+    else:
+        v = np.asarray(toward[:2], float) - (x, y)
+        dist = float(np.linalg.norm(v))
+        if dist < 1e-6:
+            raise WorkflowError("the neck has no direction")
+        u = v / dist
+    far = float(np.max(np.hypot(pts[:, 0] - x, pts[:, 1] - y))) + 50.0
+    hit = _crossing([[x, y, 0.0], [x + u[0] * far, y + u[1] * far, 0.0]], outline, width / 2)
+    if hit is None:
+        raise WorkflowError("no part beside the feeder")
+    if float(np.hypot(hit[1][0] - x, hit[1][1] - y)) < d / 2:
+        raise WorkflowError("the feeder stands on the part: move it beside the part")
+    return [float(hit[1][0]), float(hit[1][1]), 0.0]
+
+
+def neck_patch(doc, neck: str, end) -> list[dict]:
+    """A side feeder's neck run again to end (after its part moved)."""
+    data = doc.data
+    i = _index(data, neck)
+    if i is None or data["elements"][i]["type"] != "neck":
+        raise WorkflowError(f"no neck '{neck}'")
+    w = data["elements"][i]["params"]["waypoints"]
+    return [{"op": "replace", "path": f"/elements/{i}/params/waypoints",
+             "value": [list(map(float, w[0])), [float(end[0]), float(end[1]), 0.0]]}]
 
 
 def remove_patch(doc, inst: str) -> list[dict]:
@@ -400,7 +501,84 @@ def sprue_patch(doc, x: float, y: float, d_top: float, d_bottom: float) -> list[
             {"op": "replace", "path": f"/elements/{i}/params/d_bottom", "value": params["d_bottom"]}]
 
 
+def level_for(data: dict, runner: str | None, branch: dict | None, side: str) -> float:
+    """The level a runner is drawn at when none is given: its own (redrawn; back to the parting plane
+    when it changes half), its parent's (a branch on the same side), or the parting plane."""
+    if runner is not None and _index(data, runner) is not None:
+        p = data["elements"][_index(data, runner)]["params"]
+        lv = float(p.get("level", 0.0))
+    elif branch is not None and _index(data, branch["from"]) is not None:
+        p = data["elements"][_index(data, branch["from"])]["params"]
+        lv = float(p.get("level", 0.0)) if p.get("side", "drag") == side else 0.0
+    else:
+        return 0.0
+    return lv if (lv <= 0 if side == "drag" else lv >= 0) else 0.0
+
+
+def _check_level(data: dict, side: str, height: float, level: float) -> None:
+    if side == "drag" and level > 1e-9:
+        raise WorkflowError("a runner in the drag goes down from the parting plane, not up")
+    if side == "cope" and level < -1e-9:
+        raise WorkflowError("a runner in the cope goes up from the parting plane, not down")
+    b = box(data)
+    if b is None:
+        return
+    if side == "drag" and level - height < b["bottom"] - 1e-9:
+        raise WorkflowError(f"{abs(level):g} mm down, the runner would come out of the bottom of the box "
+                            f"(at most {-b['bottom'] - height:g} mm)")
+    if side == "cope" and level + height > b["top"] + 1e-9:
+        raise WorkflowError(f"{level:g} mm up, the runner would come out of the top of the box "
+                            f"(at most {b['top'] - height:g} mm)")
+
+
+def runner_level_patch(doc, runner: str, level: float) -> list[dict]:
+    """Move a runner up or down (level: the height of its parting-plane face, within its own half),
+    with everything branched off it: its branch runners and every ingate off them stay level with it.
+    The sprue, its well and filter follow in sync; the automatic ingates are cut again by the caller
+    against the part at the new height."""
+    data = doc.data
+    j = _index(data, runner)
+    if j is None or data["elements"][j]["type"] != "runner":
+        raise WorkflowError(f"no runner '{runner}'")
+    side = data["elements"][j]["params"].get("side", "drag")
+    level = float(level)
+    group = _fed_by(data, runner)
+    for e in data["elements"]:
+        if e["id"] in group and e["type"] == "runner":
+            if e["params"].get("side", "drag") != side:
+                raise WorkflowError(f"{e['id']} branches off it in the {e['params'].get('side')}: "
+                                    f"a runner and its branches move together only in one half")
+            _check_level(data, side, float(e["params"].get("height", 25.0)), level)
+
+    def fn(d):
+        for e in d["elements"]:
+            if e["id"] not in group or e["type"] not in ("runner", "ingate"):
+                continue
+            p = e["params"]
+            if e["type"] == "runner":
+                p["level"] = level
+                if p.get("drawn"):
+                    p["drawn"] = [list(q[:2]) + [level] for q in p["drawn"]]
+            p["waypoints"] = [list(q[:2]) + [level] for q in p["waypoints"]]
+    return _edit(doc, fn)
+
+
 GATE_KEYS = ("width", "thickness", "length", "side")
+TAPER_PCT = (10.0, 20.0)            # the range the engineer gave for the runner's taper
+
+
+def runner_widths(side: str, width: float, taper_pct: float) -> tuple[float, float]:
+    """(width at the parting plane, width away from it) for a runner whose bottom face is width wide
+    and whose top face is taper_pct narrower: the top is the narrower face in the cope and the drag."""
+    if side not in ("drag", "cope"):
+        raise WorkflowError("side is drag or cope")
+    lo, hi = TAPER_PCT
+    if not lo - 1e-9 <= taper_pct <= hi + 1e-9:
+        raise WorkflowError(f"the runner's taper is {lo:g}-{hi:g} %, not {taper_pct:g} %")
+    if width <= 0:
+        raise WorkflowError("type the runner's width")
+    top = width * (1 - taper_pct / 100.0)
+    return (top, width) if side == "drag" else (width, top)    # drag: the parting plane is its top
 
 
 def _crossing(chain: list, outline: list, half: float = 0.0) -> tuple[int, np.ndarray, float] | None:
@@ -466,9 +644,13 @@ def _auto_gates(data: dict, runner: str) -> list[str]:
 
 def runner_patch(doc, side: str, w_parting: float, w_far: float, height: float, points,
                  runner: str | None = None, branch: dict | None = None,
-                 gate: dict | None = None, outline: list | None = None) -> list[dict]:
+                 gate: dict | None = None, outline: list | None = None,
+                 taper_pct: float | None = None, extension: float | None = None,
+                 level: float | None = None) -> list[dict]:
     """Redraw a runner, or (runner None) draw a new one: from the sprue (points after its start under
     the sprue) or, with branch {"from": runner, "at": [x, y]}, off a point on another runner.
+    level: the height of its parting-plane face (see level_for when None); its points, and its
+    automatic ingate, are at that height.
     With gate {"width", "thickness", "length", "side"} and the part's outline on the parting plane,
     a runner that runs into the part is cut back by the ingate's length and that ingate added there
     (replacing the one placed before); one that does not, or is drawn without gate, keeps none."""
@@ -479,14 +661,16 @@ def runner_patch(doc, side: str, w_parting: float, w_far: float, height: float, 
         raise WorkflowError("side is drag or cope")
     if min(w_parting, w_far, height) <= 0:
         raise WorkflowError("type the runner's widths and height")
-    pts = [[float(p[0]), float(p[1]), 0.0] for p in points]
+    lv = level_for(data, runner, branch, side) if level is None else float(level)
+    _check_level(data, side, float(height), lv)
+    pts = [[float(p[0]), float(p[1]), lv] for p in points]
 
     # where it starts: under the sprue, at its branch point, or (redrawn) as it was
     if runner is None and branch is not None:
         j = _index(data, branch["from"])
         if j is None or data["elements"][j]["type"] != "runner":
             raise WorkflowError(f"no runner '{branch['from']}' to branch from")
-        pts = [[float(branch["at"][0]), float(branch["at"][1]), 0.0]] + pts
+        pts = [[float(branch["at"][0]), float(branch["at"][1]), lv]] + pts
         tee_from = branch["from"]
     elif runner is not None and (feeder(data, runner) or (None, None))[1] == "tee":
         tee_from = None                                       # its first point is its branch point: kept
@@ -506,20 +690,27 @@ def runner_patch(doc, side: str, w_parting: float, w_far: float, height: float, 
         if min(float(gate[k]) for k in ("width", "thickness", "length")) <= 0 or gate.get("side") not in ("drag", "cope"):
             raise WorkflowError("type the ingate's width, thickness and length")
         sx, sy = data["elements"][_index(data, SPRUE)]["anchor"]["frame"]["origin"][:2]
-        chain = pts if branched else [[sx, sy, 0.0]] + pts
+        chain = pts if branched else [[sx, sy, lv]] + pts
         cut = gate_cut(chain, outline, float(gate["length"]), max(float(w_parting), float(gate["width"])) / 2)
         if cut is not None:
             keep, S, P = cut
+            keep, S, P = [q[:2] + [lv] for q in keep], S[:2] + [lv], P[:2] + [lv]
             pts = ([chain[0]] + keep) if branched else keep
             gate_el = {"side": gate["side"], "width": float(gate["width"]), "thickness": float(gate["thickness"]),
                        "waypoints": [S, P], "placed": "auto"}
 
     params = {"side": side, "w_parting": float(w_parting), "w_far": float(w_far), "height": float(height),
-              "waypoints": pts, "drawn": drawn,
+              "waypoints": pts, "drawn": drawn, "level": lv,
               "gate_width": float(gate["width"]) if gate else 0.0,
               "gate_thickness": float(gate["thickness"]) if gate else 0.0,
               "gate_length": float(gate["length"]) if gate else 0.0,
               "gate_side": gate["side"] if gate else "drag"}
+    if taper_pct is not None:
+        params["taper_pct"] = float(taper_pct)
+    if extension is not None:
+        if extension < 0:
+            raise WorkflowError("the runner's extension cannot be negative")
+        params["extension"] = float(extension)
     ids = {e["id"] for e in data["elements"]}
     cids = {c["id"] for c in data["connections"]}
     ops: list[dict] = []
@@ -546,18 +737,18 @@ def runner_patch(doc, side: str, w_parting: float, w_far: float, height: float, 
             raise WorkflowError(f"no runner '{runner}'")
         ops.append({"op": "replace", "path": f"/elements/{i}/params",
                     "value": {**data["elements"][i]["params"], **params}})
-        if True:                                              # its automatic ingate is placed again, or dropped
-            olds = _auto_gates(data, runner)
-            if olds and gate_el is not None:                  # same ingate, new place and size
-                k = _index(data, olds[0])
-                ops.append({"op": "replace", "path": f"/elements/{k}/params",
-                            "value": {**data["elements"][k]["params"], **gate_el}})
-                gate_el, olds = None, olds[1:]
-            gone = set(olds)
-            ci = [k for k, c in enumerate(data["connections"]) if gone & {c["from"]["instance"], c["to"]["instance"]}]
-            ei = [k for k, e in enumerate(data["elements"]) if e["id"] in gone]
-            ops += [{"op": "remove", "path": f"/connections/{k}"} for k in sorted(ci, reverse=True)]
-            ops += [{"op": "remove", "path": f"/elements/{k}"} for k in sorted(ei, reverse=True)]
+        # its automatic ingate is placed again, or dropped
+        olds = _auto_gates(data, runner)
+        if olds and gate_el is not None:                      # same ingate, new place and size
+            k = _index(data, olds[0])
+            ops.append({"op": "replace", "path": f"/elements/{k}/params",
+                        "value": {**data["elements"][k]["params"], **gate_el}})
+            gate_el, olds = None, olds[1:]
+        gone = set(olds)
+        ci = [k for k, c in enumerate(data["connections"]) if gone & {c["from"]["instance"], c["to"]["instance"]}]
+        ei = [k for k, e in enumerate(data["elements"]) if e["id"] in gone]
+        ops += [{"op": "remove", "path": f"/connections/{k}"} for k in sorted(ci, reverse=True)]
+        ops += [{"op": "remove", "path": f"/elements/{k}"} for k in sorted(ei, reverse=True)]
     if gate_el is not None:
         gid = next_id(ids, "ingate")
         tee = next_id(cids, "tee")
@@ -572,24 +763,40 @@ def runner_patch(doc, side: str, w_parting: float, w_far: float, height: float, 
     return ops
 
 
-def regate_patch(doc, outline_for) -> list[dict]:
+def regate_patch(doc, outline_for, gate: dict | None = None) -> tuple[list[dict], list[str]]:
     """Every runner drawn with an ingate is cut and gated again from its drawn points against the
-    part as it is now (after a part moved). outline_for(runner params) gives the part's outline to
-    meet. One patch; a runner whose run into the part has become too short is left as it was."""
+    part as it is now (after a part moved), or, with gate {width, thickness, length, side}, every
+    runner with that ingate size. outline_for(runner params) gives the part's outline to meet.
+    Returns (one patch, a message for each runner it could not gate again: that runner is left as
+    it was)."""
+    from core.document import DesignDocument
+    scratch = DesignDocument(copy.deepcopy(doc.data), base_dir=doc.base_dir)
+    failed = []
+    for rid in runners(doc.data):
+        p = scratch.data["elements"][_index(scratch.data, rid)]["params"]
+        if gate is None and (not p.get("drawn") or not p.get("gate_length")):
+            continue
+        g = dict(gate) if gate is not None else {"width": p["gate_width"], "thickness": p["gate_thickness"],
+                                                 "length": p["gate_length"], "side": p.get("gate_side", "drag")}
+        pts = p.get("drawn") or p["waypoints"]
+        try:
+            ops = runner_patch(scratch, p["side"], p["w_parting"], p["w_far"], p["height"], pts, rid,
+                               gate=g, outline=outline_for({**p, "gate_thickness": g["thickness"],
+                                                            "gate_side": g["side"]}))
+            scratch.apply(ops)
+        except WorkflowError as e:
+            failed.append(f"{rid} could not be gated again ({e}); it was left as it was")
+    return jsonpatch.make_patch(doc.data, scratch.data).patch, failed
+
+
+def ungate_patch(doc) -> list[dict]:
+    """Every runner without its automatic ingate: drawn again from its drawn points, ingate size cleared."""
     from core.document import DesignDocument
     scratch = DesignDocument(copy.deepcopy(doc.data), base_dir=doc.base_dir)
     for rid in runners(doc.data):
         p = scratch.data["elements"][_index(scratch.data, rid)]["params"]
-        if not p.get("drawn") or not p.get("gate_length"):
-            continue
-        gate = {"width": p["gate_width"], "thickness": p["gate_thickness"], "length": p["gate_length"],
-                "side": p.get("gate_side", "drag")}
-        try:
-            ops = runner_patch(scratch, p["side"], p["w_parting"], p["w_far"], p["height"], p["drawn"], rid,
-                               gate=gate, outline=outline_for(p))
-            scratch.apply(ops)
-        except WorkflowError:
-            continue
+        scratch.apply(runner_patch(scratch, p["side"], p["w_parting"], p["w_far"], p["height"],
+                                   p.get("drawn") or p["waypoints"], rid))
     return jsonpatch.make_patch(doc.data, scratch.data).patch
 
 
@@ -635,7 +842,8 @@ def ingate_patch(doc, runner: str, start, end, side: str, width: float, thicknes
         raise WorkflowError("side is drag or cope")
     if min(width, thickness) <= 0:
         raise WorkflowError("type the ingate's width and thickness")
-    a, b = [float(start[0]), float(start[1]), 0.0], [float(end[0]), float(end[1]), 0.0]
+    lv = float(data["elements"][j]["params"].get("level", 0.0))       # level with its runner
+    a, b = [float(start[0]), float(start[1]), lv], [float(end[0]), float(end[1]), lv]
     if np.hypot(b[0] - a[0], b[1] - a[1]) < 1.0:
         raise WorkflowError("drag the ingate from the runner to the part")
     params = {"side": side, "width": float(width), "thickness": float(thickness), "waypoints": [a, b]}
@@ -704,19 +912,26 @@ def sync(data: dict) -> list[dict]:
             put(idx[cup["id"]], "anchor/frame/origin", [x, y, top])
             put(idx[cup["id"]], "params/d_bottom", float(sprue["params"]["d_top"]))
             top -= float(cup["params"]["height"])
-        floor = 0.0                                  # the deepest runner the stack drops into
+        # the deepest runner the stack drops into (floor: its bottom face), and the parting-plane face
+        # of the deepest one (deck: the filter sits there, over the well)
+        # (a cope runner raised off the plane: the sprue ends on its floor; no runner yet: the plane)
+        floors, deck = [], 0.0
         for c in _drops(data, drop_source(data)):
             j = idx.get(c["to"]["instance"])
             if j is not None and data["elements"][j]["type"] == "runner":
                 rp = data["elements"][j]["params"]
-                floor = min(floor, -float(rp.get("height", 25.0)) if rp.get("side", "drag") == "drag" else 0.0)
+                lv = float(rp.get("level", 0.0))
+                drag = rp.get("side", "drag") == "drag"
+                floors.append(lv - float(rp.get("height", 25.0)) if drag else lv)
+                deck = min(deck, lv) if drag else deck
+        floor = min(floors) if floors else 0.0
         bottom = floor
         if well is not None:
-            wtop = 0.0 if filt is not None else floor
+            wtop = deck if filt is not None else floor
             if filt is not None:
                 t = float(filt["params"]["thickness"])
-                put(idx[filt["id"]], "anchor/frame/origin", [x, y, t])
-                bottom = t
+                put(idx[filt["id"]], "anchor/frame/origin", [x, y, deck + t])
+                bottom = deck + t
             else:
                 bottom = wtop
             put(idx[well["id"]], "anchor/frame/origin", [x, y, wtop])
@@ -725,9 +940,74 @@ def sync(data: dict) -> list[dict]:
         put(i, "anchor/frame/origin", [x, y, top])
         put(i, "params/length", top - bottom)
     for e in data["elements"]:
+        if e["type"] == "runner":
+            wp = _extended(data, e)
+            if wp is not None:
+                put(idx[e["id"]], "params/waypoints", wp)
+    for e in data["elements"]:
         if e["type"] == "vent" and e.get("anchor"):
             put(idx[e["id"]], "params/length", max(b["top"] - float(e["anchor"]["frame"]["origin"][2]), 0.5))
     return out
+
+
+def _cut_at(chain: list, s: float) -> list:
+    """The polyline chain up to arc length s, or carried on straight past its end to s."""
+    pts = [np.asarray(q[:2], float) for q in chain]
+    out, run = [pts[0]], 0.0
+    for a, b in zip(pts, pts[1:]):
+        L = float(np.linalg.norm(b - a))
+        if run + L >= s - 1e-9:
+            out.append(a + (b - a) * (s - run) / L if L > 1e-12 else b)
+            return out
+        out.append(b)
+        run += L
+    a, b = pts[-2], pts[-1]
+    out[-1] = b + (b - a) / np.linalg.norm(b - a) * (s - run)
+    return out
+
+
+def _station(chain: list, q) -> float:
+    """Arc length along chain of the point of it nearest q."""
+    q = np.asarray(q[:2], float)
+    best, run = (np.inf, 0.0), 0.0
+    for a, b in zip(chain, chain[1:]):
+        a, b = np.asarray(a[:2], float), np.asarray(b[:2], float)
+        d = b - a
+        L = float(np.linalg.norm(d))
+        if L < 1e-12:
+            continue
+        t = float(np.clip((q - a) @ d / (L * L), 0.0, 1.0))
+        dist = float(np.linalg.norm(a + t * d - q))
+        if dist < best[0] - 1e-9:
+            best = (dist, run + t * L)
+        run += L
+    return best[1]
+
+
+def _extended(data: dict, r: dict) -> list | None:
+    """A runner with an extension and ingates (or runners) drawn off its side: its points, ending the
+    extension past the last of them along its drawn path.  None: nothing to change (no extension, no
+    ingate off it yet, or its ingate is the automatic one at its end)."""
+    ext = float(r["params"].get("extension") or 0.0)
+    if ext <= 0:
+        return None
+    rid = r["id"]
+    tees = [c["to"]["instance"] for c in data["connections"] if c["joint"] == "tee" and c["from"]["instance"] == rid]
+    kids = [e for e in data["elements"] if e["id"] in tees]
+    if not kids or any(k["type"] == "ingate" and k["params"].get("placed") == "auto" for k in kids):
+        return None
+    base = r["params"].get("drawn") or r["params"]["waypoints"]
+    feed = next((c for c in data["connections"] if c["to"]["instance"] == rid and c["joint"] in ("drop", "tee")), None)
+    branched = feed is not None and feed["joint"] == "tee"
+    sprue = _of_type(data, SPRUE)
+    if not branched and (sprue is None or not sprue.get("anchor")):
+        return None
+    chain = [list(b) for b in base] if branched else [sprue["anchor"]["frame"]["origin"][:2]] + [list(b) for b in base]
+    last = max(_station(chain, k["params"]["waypoints"][0]) for k in kids)
+    pts = _cut_at(chain, last + ext)
+    pts = pts if branched else pts[1:]
+    lv = float(r["params"].get("level", 0.0))
+    return [[float(q[0]), float(q[1]), lv] for q in pts]
 
 
 def with_sync(doc, ops: list[dict]) -> list[dict]:

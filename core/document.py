@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import tempfile
 from functools import lru_cache
 from pathlib import Path
 
@@ -91,7 +93,19 @@ class DesignDocument:
         return cls(json.loads(path.read_text()), base_dir=path.parent)
 
     def save(self, path: str | Path) -> None:
-        Path(path).write_text(self.to_json())
+        """Atomic: the document goes to a temporary file beside the target, which then replaces it,
+        so a crash or a full disk mid-write leaves the last good save in place."""
+        path = Path(path)
+        fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(self.to_json())
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
 
     def to_json(self) -> str:
         return json.dumps(self._data, indent=2)

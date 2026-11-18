@@ -1,12 +1,13 @@
 // The guided set-up: 1 the box and the parts in it, 2 the sprue, 3 the runner.
 // Steps 2 and 3 are sketched in plan view (looking down on the parting plane).
 // useSetup gives the panel for the right-hand side and what the viewer should do.
-import { useEffect, useRef, useState } from "react";
-import { api, type BoxProposal, type Clearances, type DesignState, type FitOption, type Vec3 } from "./api";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { api, type BoxProposal, type Clearances, type DesignState, type FitOption, type GateSpec, type Vec3 } from "./api";
 import type { SetupView } from "./Viewer";
 import { nearestOn, type Guides } from "./Setup3D";
 
-type Run = (f: () => Promise<DesignState | void>) => void;
+/** App's run: queued after the actions before it; true if it worked */
+type Run = (f: () => Promise<DesignState | void>) => Promise<boolean>;
 type Step = 1 | 2 | 3 | 4 | 5;
 type XY = [number, number];
 
@@ -39,6 +40,7 @@ const GATE_KEY = "gating.autogate";               // the automatic ingate's size
 
 const num = (s: string | number | null | undefined) => (String(s ?? "").trim() === "" ? NaN : Number(s));
 const ok = (...v: number[]) => v.every((x) => Number.isFinite(x) && x > 0);
+const TAPER = [10, 20];          // % the runner's top face is narrower than its bottom: the engineer's range
 const str = (v: unknown) => (v === undefined || v === null ? "" : String(v));
 const xy = (p: number[]): XY => [p[0], p[1]];
 const v3 = (p: XY): Vec3 => [p[0], p[1], 0];
@@ -61,21 +63,29 @@ function Field({ label, value, set, onCommit, unit = "mm", width = 70 }: {
 }
 
 const typing = () => {
-  const a = document.activeElement;
-  return !!a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.tagName === "SELECT");
+  const a = document.activeElement as HTMLElement | null;
+  return !!a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.tagName === "SELECT" || a.isContentEditable);
 };
 
-export function useSetup(state: DesignState | null, run: Run, setPlan: (plan: boolean) => void): { panel: JSX.Element | null; view: SetupView } {
+type BoxField = "L" | "W" | "H" | "P";
+
+/** ui.active: the set-up tab is showing (its keys work only then); ui.busy: an action is running. */
+export function useSetup(state: DesignState | null, run: Run, setPlan: (plan: boolean) => void,
+  ui: { active: boolean; busy: boolean }): { panel: JSX.Element | null; view: SetupView } {
   const sprue = state ? el(state, "sprue") : null;
   // every runner, in drawing order: dropped into from the sprue, or branched off another runner
   const runnerIds: string[] = state ? (state.document.elements as any[]).filter((e) => e.type === "runner").map((e) => e.id) : [];
   /** where a runner starts (under the sprue, or its branch point) and its points after that */
   const geo = (id: string): { start: XY; pts: XY[]; branched: boolean; width: number; from: string | null } => {
     const r = el(state!, id);
-    // edited as drawn (a gated runner is stored cut back; it is cut again from these)
+    // a runner with its automatic ingate is stored cut back and edited as drawn (it is cut again from
+    // those); any other is shown as it is, its extension past the last side ingate included
+    const conns = state!.document.connections as any[];
+    const autoGated = conns.some((c) => c.joint === "tee" && c.from.instance === id
+      && el(state!, c.to.instance)?.type === "ingate" && el(state!, c.to.instance)?.params.placed === "auto");
     const drawn = (r.params.drawn as number[][] | undefined) ?? [];
-    const wp = (drawn.length ? drawn : (r.params.waypoints as number[][])).map(xy);
-    const feed = (state!.document.connections as any[]).find((c) => c.to.instance === id && (c.joint === "drop" || c.joint === "tee"));
+    const wp = (autoGated && drawn.length ? drawn : (r.params.waypoints as number[][])).map(xy);
+    const feed = conns.find((c) => c.to.instance === id && (c.joint === "drop" || c.joint === "tee"));
     const branched = feed?.joint === "tee";
     const s0 = el(state!, "sprue")?.anchor.frame.origin ?? [0, 0];
     return { start: branched ? wp[0] : [s0[0], s0[1]], pts: branched ? wp.slice(1) : wp, branched,
@@ -88,7 +98,7 @@ export function useSetup(state: DesignState | null, run: Run, setPlan: (plan: bo
   const [L, setL] = useState(""), [W, setW] = useState(""), [H, setH] = useState(""), [P, setP] = useState("");
   const [part, setPart] = useState("part");
   // the suggested fit: how to part it, the clearances, the proposed box
-  const [suggesting, setSuggesting] = useState(true);
+  const [suggesting, setSuggesting] = useState(false);   // only when asked: the box is typed by hand
   const [options, setOptions] = useState<FitOption[] | null>(null);
   const [choice, setChoice] = useState<"widest" | "flat">("widest");
   const last = lastClearances();
@@ -96,6 +106,11 @@ export function useSetup(state: DesignState | null, run: Run, setPlan: (plan: bo
   const [cAbove, setCAbove] = useState(last.above ?? ""), [cExtra, setCExtra] = useState(last.extra ?? "");
   const [cStep, setCStep] = useState(last.step ?? "");
   const [proposal, setProposal] = useState<BoxProposal | null>(null);
+  const [fitError, setFitError] = useState<string | null>(null);     // the suggestion failed
+  const [fitTry, setFitTry] = useState(0);                            // bumped to ask again
+  const [boxError, setBoxError] = useState<string | null>(null);     // the box proposal failed
+  const typedBox = useRef(new Set<BoxField>());                      // box fields typed by hand: no proposal overwrites them
+  const typeBox = (f: BoxField, set: (v: string) => void) => (v: string) => { typedBox.current.add(f); set(v); };
   const [noteText, setNoteText] = useState<string | null>(null);
   const addInput = useRef<HTMLInputElement>(null);
   // step 2
@@ -103,7 +118,10 @@ export function useSetup(state: DesignState | null, run: Run, setPlan: (plan: bo
   const [sx, setSx] = useState(""), [sy, setSy] = useState("");
   // step 3
   const [side, setSide] = useState("drag");
-  const [wp, setWp] = useState(""), [wf, setWf] = useState(""), [rh, setRh] = useState("");
+  // the runner's section: its bottom (wider) face, the top that many % narrower, its height;
+  // and how far it runs on past its last ingate
+  const [wp, setWp] = useState(""), [tp, setTp] = useState(""), [rh, setRh] = useState(""), [ex, setEx] = useState("");
+  const [lv, setLv] = useState("");               // how far the runner sits from the parting plane, into its half (mm)
   const [extending, setExtending] = useState(false);
   const [draft, setDraftState] = useState<XY[]>([]);
   const draftRef = useRef<XY[]>([]);                 // the latest points, for a finish in the same event as a click
@@ -141,44 +159,52 @@ export function useSetup(state: DesignState | null, run: Run, setPlan: (plan: bo
     : [];
   const gate = gates.find((g) => g.id === selIg) ?? null;
 
-  // a new design: start at the first unfinished step, forms filled from what is there
-  useEffect(() => {
-    if (!state) return;
+  // A new design: start at the first unfinished step, forms filled from what is there. Done while
+  // rendering (not in an effect), so the first paint already shows the right step and view; React
+  // renders again at once with these values. The sizes typed for runners, ingates, feeders and
+  // vents are kept on purpose: set once, used for every design.
+  const [seen, setSeen] = useState<string | null>(null);
+  if (state && state.id !== seen) {
+    setSeen(state.id);
     const b = state.box;
     setL(str(b?.size[0])); setW(str(b?.size[1])); setH(str(b?.size[2])); setP(str(b?.parting));
+    typedBox.current = new Set();
     setDTop(str(sprue?.params.d_top)); setDBot(str(sprue?.params.d_bottom));
     setActive(runnerIds[0] ?? null);
     setSelIg(null);
     {
-      const cup = state ? el(state, "pouring_cup") : null, well = state ? el(state, "sprue_well") : null;
-      const fl = state ? el(state, "filter") : null;
+      const cup = el(state, "pouring_cup"), well = el(state, "sprue_well");
+      const fl = el(state, "filter");
       setCupD(str(cup?.params.d_top)); setCupH(str(cup?.params.height));
       setWellD(str(well?.params.d)); setWellDepth(str(well?.params.depth));
       setUseFilter(!!fl); setFShape(fl?.params.shape ?? "square"); setFSize(str(fl?.params.size)); setFT(str(fl?.params.thickness));
     }
-    setSuggesting(!b); setOptions(null); setProposal(null); setChoice("widest");
+    setSuggesting(false); setOptions(null); setProposal(null); setChoice("widest");
+    setFitError(null); setBoxError(null); setNoteText(null);
     setStep(gates.length ? 4 : sprue ? 3 : 1);
     setPart("part"); setExtending(false); setDraft([]); setSel(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state?.id]);
+    setOrigin(null); setTool("top");
+  }
   useEffect(() => {
     setSx(sprue ? String(sprue.anchor.frame.origin[0]) : ""); setSy(sprue ? String(sprue.anchor.frame.origin[1]) : "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sprue?.anchor.frame.origin[0], sprue?.anchor.frame.origin[1]]);
-  useEffect(() => setPlan(step !== 1), [step]); // eslint-disable-line react-hooks/exhaustive-deps
+  // before paint, so a design that opens on a plan step is never drawn in 3D first
+  useLayoutEffect(() => setPlan(step !== 1), [step, setPlan]);
   // ask for the two ways to part it when the suggestion screen opens
   const fitting = step === 1 && suggesting && !!state?.part;
   useEffect(() => {
     if (!fitting || options || !state) return;
     let live = true;
+    setFitError(null);
     api.suggestFit(state.id).then((r) => {
       if (!live) return;
       setOptions(r.options);
       setChoice(r.options[0]?.id ?? "widest");
-    }).catch(() => undefined);
+    }).catch((e) => { if (live) setFitError(String((e as Error).message)); });
     return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fitting, options, state?.id]);
+  }, [fitting, options, state?.id, fitTry]);
   const opt = options?.find((o) => o.id === choice) ?? options?.[0] ?? null;
   const clear: Clearances = {
     sides: num(cSides) || 0, below: num(cBelow) || 0, above: num(cAbove) || 0, extra: num(cExtra) || 0, step: num(cStep) || 0,
@@ -189,29 +215,46 @@ export function useSetup(state: DesignState | null, run: Run, setPlan: (plan: bo
     try {
       localStorage.setItem(CLEAR_KEY, JSON.stringify({ sides: cSides, below: cBelow, above: cAbove, extra: cExtra, step: cStep }));
     } catch { /* private window: nothing remembered */ }
+    let live = true;              // a reply for clearances typed since is dropped
     const t = setTimeout(() => {
       api.proposeBox(state.id, opt.bbox, clear).then((p) => {
+        if (!live) return;
         setProposal(p);
-        setL(String(p.length)); setW(String(p.width)); setH(String(p.height)); setP(String(p.parting));
-      }).catch(() => undefined);
+        setBoxError(null);
+        const typed = typedBox.current;
+        if (!typed.has("L")) setL(String(p.length));
+        if (!typed.has("W")) setW(String(p.width));
+        if (!typed.has("H")) setH(String(p.height));
+        if (!typed.has("P")) setP(String(p.parting));
+      }).catch((e) => { if (live) setBoxError(String((e as Error).message)); });
     }, 200);
-    return () => clearTimeout(t);
+    return () => { live = false; clearTimeout(t); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fitting, opt?.id, options, cSides, cBelow, cAbove, cExtra, cStep]);
   // picking a runner shows its sizes; a new runner starts from the last sizes used
   useEffect(() => {
     if (!runner) return;
     setSide(runner.params.side ?? "drag");
-    setWp(str(runner.params.w_parting)); setWf(str(runner.params.w_far)); setRh(str(runner.params.height));
+    const wa = Number(runner.params.w_parting), wb = Number(runner.params.w_far);
+    const typedPct = Number(runner.params.taper_pct) || 0;
+    setWp(str(Math.max(wa, wb)));
+    setTp(typedPct > 0 ? str(typedPct) : str(Math.round((1 - Math.min(wa, wb) / Math.max(wa, wb)) * 1000) / 10));
+    setRh(str(runner.params.height));
+    setEx(Number(runner.params.extension) > 0 ? str(runner.params.extension) : "");
     setSel(null); setExtending(false); setDraft([]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, state?.id]);
+  // its level, also when it was dragged up or down in 3D
+  const runnerLevel = runner ? Number(runner.params.level) || 0 : 0;
+  useEffect(() => { setLv(runnerLevel ? str(Math.abs(runnerLevel)) : ""); }, [active, runnerLevel]);
 
   const sid = state?.id ?? "";
   const g0 = runner && state ? geo(runner.id) : null;
   const waypoints: XY[] = g0 ? g0.pts : [];             // the active runner's points after its start
-  const size = { side, w_parting: num(wp), w_far: num(wf), height: num(rh) };
-  const sizeOk = ok(size.w_parting, size.w_far, size.height);
+  const taperOk = num(tp) >= TAPER[0] && num(tp) <= TAPER[1];
+  const exNum = ex.trim() === "" ? 0 : num(ex);
+  const size = { side, width: num(wp), taper_pct: num(tp), height: num(rh), extension: exNum };
+  const sizeOk = ok(size.width, size.height) && taperOk && Number.isFinite(exNum) && exNum >= 0;
   const drawing = step === 3 && !!sprue && sizeOk && (extending || !runner);
   const needOrigin = drawing && !runner && runnerIds.length > 0 && !origin;    // the first click says where it starts
   const gateSpec = ok(num(gW), num(gT), num(gL)) ? { side: gSide, width: num(gW), thickness: num(gT), length: num(gL) } : null;
@@ -228,14 +271,42 @@ export function useSetup(state: DesignState | null, run: Run, setPlan: (plan: bo
       }
       return st;
     });
-  /** the ingate settings changed: every runner is drawn again with them (one undo step each) */
+  /** the active runner up or down: level is its parting-plane face's height (negative in the drag) */
+  const sendLevel = (level: number) => {
+    if (!runner || !active) return Promise.resolve(false);
+    return run(() => api.setRunnerLevel(sid, active, Math.round(level * 10) / 10));
+  };
+  const lvNum = lv.trim() === "" ? 0 : num(lv);
+  const lvOk = Number.isFinite(lvNum) && lvNum >= 0;
+  /** the runner and everything hanging off it (its branches, their ingates, on): they move up and down together */
+  const hanging = (id: string): string[] => {
+    const out = [id];
+    for (let k = 0; k < out.length; k++)
+      for (const c of state!.document.connections as any[])
+        if (c.joint === "tee" && c.from.instance === out[k] && !out.includes(c.to.instance)) out.push(c.to.instance);
+    return out;
+  };
+  const gateSent = useRef<string | null>(null);
+  /** a runner whose automatic ingate is not this one (null: none) */
+  const gateDiffers = (spec: GateSpec | null) => runnerIds.some((id) => {
+    const p = el(state!, id).params;
+    if (!spec) return Number(p.gate_length) > 0;
+    return Number(p.gate_width) !== spec.width || Number(p.gate_thickness) !== spec.thickness
+      || Number(p.gate_length) !== spec.length || (p.gate_side ?? "drag") !== spec.side;
+  });
+  /** the ingate settings changed: every runner gets them, in one call and one undo step. All three
+   * fields blank is "no ingate"; while only some are filled in (being retyped) nothing is sent. */
   const regate = (gate = gateSpec) => {
     try {   // the fields as typed (text), so they come back into the fields as they were
       localStorage.setItem(GATE_KEY, JSON.stringify({ side: gate?.side ?? gSide, width: gW, thickness: gT, length: gL }));
     } catch { /* private window: nothing remembered */ }
-    for (const id of runnerIds) {
-      const r = el(state!, id);
-      sendRunner(geo(id).pts, { side: r.params.side, w_parting: r.params.w_parting, w_far: r.params.w_far, height: r.params.height }, id, gate);
+    const blank = [gW, gT, gL].every((v) => v.trim() === "");
+    if (!gate && !blank) return;
+    const key = JSON.stringify(gate);
+    if (gateSent.current === key) return;              // the same one is on its way (Enter, then blur)
+    if (state && runnerIds.length && gateDiffers(gate)) {
+      gateSent.current = key;
+      run(() => api.setGate(sid, gate)).then(() => { gateSent.current = null; });
     }
   };
   const finish = (at?: XY) => {
@@ -271,33 +342,34 @@ export function useSetup(state: DesignState | null, run: Run, setPlan: (plan: bo
     const [a, b] = (gate.params.waypoints as number[][]).map(xy);
     sendIngate(gate.runner, a, b, gate.id, sz);
   };
-  useEffect(() => {
-    if (step !== 4) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (typing() || !selIg || (e.key !== "Backspace" && e.key !== "Delete")) return;
+  // Keys, only while the set-up tab shows, no field has focus and no action is running.
+  // Step 3 (sketching): Enter finishes, Escape stops, Backspace/Delete removes a point.
+  // Step 4: Backspace/Delete removes the picked ingate. The handler is this render's (in a ref),
+  // so the listener itself only depends on whether the tab is active.
+  const onKey = useRef<(e: KeyboardEvent) => void>(() => undefined);
+  onKey.current = (e: KeyboardEvent) => {
+    if (!state || !ui.active || ui.busy || typing() || e.metaKey || e.ctrlKey) return;
+    const del = e.key === "Backspace" || e.key === "Delete";
+    if (step === 4) {
+      if (!selIg || !del) return;
       e.preventDefault();
       run(() => api.removeIngate(sid, selIg));
       setSelIg(null);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  });
-
-  // keys while sketching: Enter finishes, Escape stops, Backspace/Delete removes a point
-  useEffect(() => {
-    if (step !== 3) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (typing()) return;
+    } else if (step === 3) {
       if (drawing && e.key === "Enter") { e.preventDefault(); finish(); }
       else if (drawing && e.key === "Escape") { e.preventDefault(); if (draft.length) finish(); else setExtending(false); }
-      else if (drawing && (e.key === "Backspace" || e.key === "Delete")) { e.preventDefault(); setDraft((d) => d.slice(0, -1)); }
-      else if (!drawing && sel !== null && (e.key === "Backspace" || e.key === "Delete") && waypoints.length > 1) {
+      else if (drawing && del) { e.preventDefault(); setDraft((d) => d.slice(0, -1)); }
+      else if (!drawing && sel !== null && del && waypoints.length > 1) {
         e.preventDefault(); sendRunner(waypoints.filter((_, i) => i !== sel)); setSel(null);
       }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  });
+    }
+  };
+  useEffect(() => {
+    if (!ui.active) return;
+    const f = (e: KeyboardEvent) => onKey.current(e);
+    window.addEventListener("keydown", f);
+    return () => window.removeEventListener("keydown", f);
+  }, [ui.active]);
 
   if (!state || !state.part) return { panel: null, view: { mode: "none" } };
   const box = state.box;
@@ -307,7 +379,8 @@ export function useSetup(state: DesignState | null, run: Run, setPlan: (plan: bo
   const outside = state.issues.filter((i) => (i.rule === "mold.outside_flask" || i.rule === "mold.parts_overlap") && i.instances.includes("part"));
   const sprueAt: XY | null = sprue ? xy(sprue.anchor.frame.origin) : null;
   const diaOk = ok(num(dTop), num(dBot));
-  const placeSprue = (p: XY) => run(() => api.placeSprue(sid, { x: Math.round(p[0]), y: Math.round(p[1]), d_top: num(dTop), d_bottom: num(dBot) }));
+  // p as given: the plan view snaps it (grid, guides; exact) or rounds a free placement to whole mm
+  const placeSprue = (p: XY) => run(() => api.placeSprue(sid, { x: p[0], y: p[1], d_top: num(dTop), d_bottom: num(dBot) }));
   const others = runnerIds.filter((id) => id !== active).map((id) => {
     const g = geo(id);
     return { id, start: g.start, points: g.pts, width: g.width };
@@ -380,8 +453,15 @@ export function useSetup(state: DesignState | null, run: Run, setPlan: (plan: bo
       others: step === 3 ? others : [],
       guides,
       onPickOther: (id) => { setActive(id); setDraft([]); setExtending(false); },
+      lift: step === 3 && runner && !drawing && g0 && g0.pts.length ? {
+        ids: hanging(runner.id),
+        // a third of the way along its first run (clear of the points and the white bend dots), at its middle
+        at: [g0.start[0] + (g0.pts[0][0] - g0.start[0]) / 3, g0.start[1] + (g0.pts[0][1] - g0.start[1]) / 3,
+             runnerLevel + (runner.params.side === "cope" ? 1 : -1) * Number(runner.params.height) / 2] as Vec3,
+        onLift: (dz) => sendLevel(runnerLevel + dz),
+      } : undefined,
       runner: step === 3 && sprue && sizeOk ? {
-        width: size.w_parting,
+        width: size.width,
         start: runner ? g0!.start : newStart,
         points: drawing ? (extending ? [...waypoints, ...draft] : draft) : waypoints,
         drawing,
@@ -407,9 +487,9 @@ export function useSetup(state: DesignState | null, run: Run, setPlan: (plan: bo
         : "Click on the part where the vent goes up",
       onPlace: (p) => {
         if (!ready) return;
-        const [x, y] = [Math.round(p[0]), Math.round(p[1])];
-        if (tool === "vent") run(() => api.addVent(sid, { x, y, d }));
-        else run(() => api.addFeeder(sid, { kind: tool, x, y, d, height: num(fdH),
+        const [x, y] = p;           // snapped exactly, or rounded to whole mm when placed free
+        if (tool === "vent") return run(() => api.addVent(sid, { x, y, d }));
+        return run(() => api.addFeeder(sid, { kind: tool, x, y, d, height: num(fdH),
           neck: tool === "side" ? { width: num(nW), thickness: num(nT), side: nSide } : null }));
       },
     };
@@ -459,8 +539,21 @@ export function useSetup(state: DesignState | null, run: Run, setPlan: (plan: bo
       {fitting && (
         <section>
           <h4>How to part it</h4>
-          {!options ? (
+          {fitError ? (
+            <>
+              <p className="fitbad">Could not work out how to part it: {fitError}</p>
+              <div className="row">
+                <button onClick={() => { setFitError(null); setOptions(null); setFitTry((n) => n + 1); }}>Try again</button>
+                <button onClick={() => setSuggesting(false)}>Set the box by hand</button>
+              </div>
+            </>
+          ) : !options ? (
             <p className="hint">Working out how to turn and part the casting…</p>
+          ) : !options.length ? (
+            <div className="row">
+              <span className="fitbad">No way to part it came back.</span>
+              <button onClick={() => setSuggesting(false)}>Set the box by hand</button>
+            </div>
           ) : (
             <div className="parts">
               {options.map((o) => (
@@ -496,16 +589,24 @@ export function useSetup(state: DesignState | null, run: Run, setPlan: (plan: bo
                 {" "}Edit the box if you want it different:
               </p>
               <div className="fields">
-                <Field label="Length" value={L} set={setL} />
-                <Field label="Width" value={W} set={setW} />
-                <Field label="Height" value={H} set={setH} />
-                <Field label="Parting plane height" value={P} set={setP} />
+                <Field label="Length" value={L} set={typeBox("L", setL)} />
+                <Field label="Width" value={W} set={typeBox("W", setW)} />
+                <Field label="Height" value={H} set={typeBox("H", setH)} />
+                <Field label="Parting plane height" value={P} set={typeBox("P", setP)} />
               </div>
+              {boxError && <p className="fitbad">No box proposed: {boxError}</p>}
+              {proposal && typedBox.current.size > 0 && (
+                <button className="link" onClick={() => {
+                  typedBox.current = new Set();
+                  setL(String(proposal.length)); setW(String(proposal.width)); setH(String(proposal.height)); setP(String(proposal.parting));
+                }}>Back to the proposed box</button>
+              )}
+              {!boxOk && L && W && H && P && <p className="fitbad">The sizes must be positive, the parting plane below the height.</p>}
               <div className="row">
                 <button className="primary" disabled={!boxOk}
                   onClick={() => {
-                    run(() => api.applyFit(sid, { move: opt.move, ...boxDims, shift: proposal?.shift ?? [0, 0, 0] }));
-                    setSuggesting(false);
+                    run(() => api.applyFit(sid, { move: opt.move, ...boxDims, shift: proposal?.shift ?? [0, 0, 0] }))
+                      .then((ok) => { if (ok) setSuggesting(false); });
                   }}>Use this</button>
                 <button disabled={!boxOk}
                   onClick={() => run(async () => {
@@ -522,7 +623,7 @@ export function useSetup(state: DesignState | null, run: Run, setPlan: (plan: bo
 
       {step === 1 && !fitting && (
         <section>
-          <button onClick={() => { setOptions(null); setSuggesting(true); }}>Suggest how to part it again</button>
+          <button onClick={() => { setOptions(null); setFitError(null); typedBox.current = new Set(); setSuggesting(true); }}>Suggest how to part it</button>
           <h4>Molding box</h4>
           <p className="muted">Inside size of the box. The parting plane is measured up from the box bottom.</p>
           <div className="fields">
@@ -533,8 +634,9 @@ export function useSetup(state: DesignState | null, run: Run, setPlan: (plan: bo
           </div>
           <button
             className="primary"
-            disabled={!ok(num(L), num(W), num(H), num(P))}
-            onClick={() => run(() => api.setBox(sid, { length: num(L), width: num(W), height: num(H), parting: num(P) }))}
+            disabled={!boxOk}
+            title={boxOk ? undefined : "The sizes must be positive, the parting plane below the height"}
+            onClick={() => run(() => api.setBox(sid, boxDims))}
           >
             {box ? "Update box" : "Make box"}
           </button>
@@ -696,10 +798,22 @@ export function useSetup(state: DesignState | null, run: Run, setPlan: (plan: bo
             ))}
           </div>
           <div className="fields">
-            <Field label="Width at parting plane" value={wp} set={setWp} onCommit={() => { if (runner && sizeOk) sendRunner(waypoints); }} />
-            <Field label="Width away from it" value={wf} set={setWf} onCommit={() => { if (runner && sizeOk) sendRunner(waypoints); }} />
+            <Field label="Bottom width" value={wp} set={setWp} onCommit={() => { if (runner && sizeOk) sendRunner(waypoints); }} />
+            <Field label="Top narrower by" unit="%" value={tp} set={setTp} onCommit={() => { if (runner && sizeOk) sendRunner(waypoints); }} />
             <Field label="Height" value={rh} set={setRh} onCommit={() => { if (runner && sizeOk) sendRunner(waypoints); }} />
+            <Field label="Extension past last ingate" value={ex} set={setEx} onCommit={() => { if (runner && sizeOk) sendRunner(waypoints); }} />
+            {runner && (
+              <Field label={side === "cope" ? "Height above the parting plane" : "Depth below the parting plane"} value={lv} set={setLv}
+                onCommit={() => { if (lvOk && lvNum !== Math.abs(runnerLevel)) sendLevel(side === "cope" ? lvNum : -lvNum); }} />
+            )}
           </div>
+          {lv.trim() !== "" && !lvOk && <p className="error">Type how far into the {side} it sits, in mm (0: on the parting plane).</p>}
+          {tp.trim() !== "" && !taperOk && <p className="error">The top is {TAPER[0]}–{TAPER[1]} % narrower than the bottom.</p>}
+          <p className="muted">The runner's top face is the narrower one, in the drag and the cope.
+            {" "}It sits on the parting plane, or deeper into its half by the depth typed (or dragged with the arrow in 3D);
+            {" "}its branches and ingates go with it, and the sprue reaches down to it.
+            {" "}With an extension, the runner ends that far past the last ingate drawn off its side (Ingates step),
+            {" "}wherever you drew its end; blank: it ends where drawn. A runner run into a part keeps its in-line ingate and no extension.</p>
           {drawing ? (
             <div className="row">
               <button className="primary" disabled={!draft.length} onClick={() => finish()}>Finish</button>

@@ -1,0 +1,32 @@
+{
+  "_about": "Every knob the seed generator samples, with its range. Ranges are [low, high] (uniform; integers for int knobs); choices are sampled uniformly from the list (shorten the list to restrict). All values are left null on purpose: the engineer sets them. generate_seeds refuses to run while any is null.",
+
+  "modulus_factor":          {"range": [null, null], "about": "feeder modulus / modulus of the zone(s) it feeds"},
+  "feeding_efficiency": {
+    "unsleeved":             {"range": [null, null], "about": "fraction of the feeder's volume that can feed"},
+    "sleeved":               {"range": [null, null]}
+  },
+  "neck_ratio":              {"range": [null, null], "about": "neck modulus / zone modulus (side feeders)"},
+  "riser_style":             {"choices": ["top", "side", "auto"], "about": "auto: the ranked candidates of both kinds"},
+  "attachment_choice":       {"choices": ["nearest", "random_top_k"]},
+  "attachment_top_k":        {"range": [null, null], "int": true},
+  "merge_shared_risers":     {"range": [null, null], "about": "probability that an eligible pair of hot spots gets one shared feeder"},
+  "feeding_distance_factor": {"range": [null, null], "about": "feeding distance = factor x section thickness of the hot spot"},
+  "ingate_placement":        {"choices": ["nearest_thick_section", "random_valid"]},
+  "filling_time_s":          {"range": [null, null]},
+
+  "_added": "Knobs not in the original list, needed to turn the rules into a full spec:",
+  "riser_height_ratio":      {"range": [null, null], "about": "feeder height / diameter"},
+  "sleeve_probability":      {"range": [null, null], "about": "probability a feeder is sleeved (no sleeve element in the CAD module yet: keep [0, 0] to build)"},
+  "sleeve_mef":              {"range": [null, null], "about": "modulus extension factor of a sleeve"},
+  "neck_aspect":             {"range": [null, null], "about": "neck width / thickness"},
+  "neck_length_mm":          {"range": [null, null], "about": "gap between a side feeder and the casting, along the neck"},
+  "ingates_per_cavity":      {"range": [null, null], "int": true},
+  "ingate_aspect":           {"range": [null, null], "about": "ingate width / thickness"},
+  "ingate_length_mm":        {"range": [null, null]},
+  "runner_side":             {"choices": ["drag", "cope"]},
+  "runner_height_ratio":     {"range": [null, null], "about": "runner height / width at the parting plane"},
+  "runner_taper_pct":        {"range": [null, null], "about": "% the runner's top face is narrower than its bottom (the CAD module takes 10-20)"},
+  "runner_extension_mm":     {"range": [null, null], "about": "how far the runner runs on past its last ingate (dross trap)"},
+  "cavity_gap_mm":           {"range": [null, null], "about": "gap between neighbouring cavities' bounding boxes"}
+}

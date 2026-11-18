@@ -202,3 +202,56 @@ Architectural choices and why, newest last.  Foundry numbers are never decided h
     these besides `gating.<id>`.
 50. **Filters in the simulation**: ayrton-solid's `validation/stl_case.py` reads `regions/manifest.json`
     and voxelizes every `filter` region into the case's filter cells (the solver's ceramic foam).
+
+## Review fixes (2026-11-11)
+
+51. **Saving never loses a design**: a save writes a temporary file beside the design and renames it over
+    the old one (a crash mid-write leaves the last good save). The first save of a session keeps the file
+    as it was opened as `<name>.gating.json.bak`. A saved design that cannot be read is renamed
+    `<name>.gating.unreadable-<time>.json` and a new design started, with a note saying so; one that reads
+    but cannot be rebuilt is refused and left alone. "Start over" keeps the old design as
+    `<name>.gating.previous.json`. Save and export failures are 422 with the reason, not 500.
+52. **What sits on a part goes with it**: top feeders and vents (their base), side feeders with their necks
+    (the neck's end) and hand-drawn ingates (their end) belong to the part their contact point lies on,
+    found from the geometry (within 2 mm plus the embed), not from bounding boxes. A part move, turn,
+    centring or fit carries them; then, in the same undo step, top feeders and vents are seated again on
+    the moved part, necks run again toward the part and every gated runner is gated again. Removing a part
+    removes what sits on it. Moving the sprue, adding a part and removing one also re-gate. What could not
+    follow (nothing under a feeder after a turn, a runner too short to gate) is told in the state's `notes`.
+53. **Seated on curved tops**: vertical rays at the centre and on two rings inside the edge (radius d/2
+    with 16 rays, d/4 with 8) find the part's top under a feeder or vent. Its base goes on the highest of
+    those, so the typed height (vent: to the box top) stands clear of the part everywhere; its `embed`
+    reaches from there to the lowest plus the usual 1 mm, and the gate joint cuts it back to the part.
+    Feeders and vents declare their own `embed` (up to 2000 mm) for this. Rays that find no part (it
+    hangs over the edge) give a note.
+54. **One change at a time per design**: POST requests on one design session wait for each other (a
+    thread lock per session, taken by an app-wide dependency); mesh downloads do not wait. Glb meshes are
+    kept least-recently-used up to 512 MB, part files read up to 16.
+55. **Ingate size for every runner** (`/workflow/gate`): every runner is cut and gated again with the new
+    size in one undo step (null: no automatic ingates); a runner that cannot be gated is told and left.
+56. **Exports into the same folder**: region files listed in the old manifest whose solid is gone are
+    deleted, so the folder holds only the exported design's regions. An added part file is stored
+    relative to the design, like the main part.
+57. **The editor sends one change at a time** (a queue in `run`), covers the view while one runs, keeps a
+    dragged item where it was dropped until the reply, and acts on Delete/Enter/Escape only on the set-up
+    tab. Snapped and aligned positions are sent exactly; free ones in whole mm.
+58. **Large parts stay fast** (2026-11-15, after a 4,313-face STEP took ~12 s per move): a part file is
+    read, healed, given its machining stock, scaled, weighed and meshed once (`core.part._base`); the
+    viewer gets that mesh once and places it by the part's matrix (`meshes[].matrix`), so a move sends
+    no new mesh. Questions asked on every edit go through the triangles to the few exact faces that
+    matter (`core.partmesh`): seating rays (16 s -> 40 ms), sections (kept in the part's own frame, so
+    a sideways move cuts nothing again), the nearest part, and the bounding box (exact, from the faces
+    at the mesh's sides, kept per turn; an exact box of the whole part took 15 s and was taken several
+    times per edit). Overlap volumes are kept by what the two solids are and where. A part move, copy,
+    file, removal or sprue change rebuilds once, after seating and re-gating, not twice. Results match
+    the exact ones; the mesh is relative (0.1, 0.3 rad), as an absolute 0.1 mm does not finish on such
+    a part.
+59. **A runner moves up and down within its half** (2026-11-15, the engineer's choices): `level` is the
+    height of its parting-plane face (0 on the plane; down into the drag, up into the cope, never across;
+    not out of the box). Its points, its branches (same half only) and every ingate off them stay level
+    with it; the automatic ingates are cut again against the part at that height (the outline is taken
+    through the runner's band, not at the plane). The sprue reaches down to the deepest runner's floor
+    (or ends on a raised cope runner's floor); the filter sits on the deepest drag runner's top face
+    with the well under it. A redrawn runner keeps its level, a branch takes its parent's, a runner
+    switched to the other half goes back to the plane. Set by a typed depth / height in the runner step
+    or a z-only arrow on the selected runner in 3D (`/workflow/runner_level`, one undo step).

@@ -1,6 +1,8 @@
 """Thin helpers over build123d / OCP that the rest of the core shares."""
 from __future__ import annotations
 
+from collections import OrderedDict
+
 import numpy as np
 from build123d import Compound, Location, Shape
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut, BRepAlgoAPI_Fuse
@@ -141,7 +143,30 @@ def common_volume(a: Shape, b: Shape) -> float:
     return solids_volume(Shape.cast(op.Shape()))
 
 
-def boxes_touch(a: Shape, b: Shape, tol: float = 1e-3) -> bool:
-    ba, bb = a.bounding_box(), b.bounding_box()
-    amin, amax, bmin, bmax = (tuple(v) for v in (ba.min, ba.max, bb.min, bb.max))
+def boxes_touch(a, b, tol: float = 1e-3) -> bool:
+    """Whether two bounding boxes touch; a and b are shapes or ready boxes (lo, hi)."""
+    amin, amax = _box(a)
+    bmin, bmax = _box(b)
     return all(amin[i] <= bmax[i] + tol and bmin[i] <= amax[i] + tol for i in range(3))
+
+
+def _box(x):
+    if isinstance(x, Shape):
+        b = x.bounding_box()
+        return tuple(b.min), tuple(b.max)
+    return tuple(x[0]), tuple(x[1])
+
+
+_COMMON: "OrderedDict[tuple, float]" = OrderedDict()
+
+
+def common_volume_cached(key, a: Shape, b: Shape) -> float:
+    """common_volume, kept by key (what a and b are and where): rebuilding a design asks the same
+    overlaps again for everything that did not change, and against a large part each takes ~0.7 s."""
+    if key in _COMMON:
+        _COMMON.move_to_end(key)
+        return _COMMON[key]
+    v = _COMMON[key] = common_volume(a, b)
+    while len(_COMMON) > 4096:
+        _COMMON.popitem(last=False)
+    return v

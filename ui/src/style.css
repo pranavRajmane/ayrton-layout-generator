@@ -13,7 +13,7 @@ header { grid-area: head; display: flex; gap: 6px; align-items: center; padding:
 header .path { width: 380px; }
 .sep { width: 10px; } .grow { flex: 1; }
 .error { grid-area: err; background: #fde8e8; color: var(--err); padding: 6px 10px; white-space: pre-wrap; }
-.note { grid-area: note; background: #e8f3fd; padding: 6px 10px; cursor: pointer; }
+.note { grid-area: note; background: #e8f3fd; padding: 6px 10px; cursor: pointer; white-space: pre-wrap; }
 .busy { color: var(--accent); }
 aside { background: var(--panel); overflow: auto; padding: 8px 10px; }
 .tree { grid-area: tree; border-right: 1px solid var(--line); }
@@ -76,3 +76,7 @@ header button.primary { background: #2f7de1; color: #fff; border-color: #2f7de1;
 .dropzone { position: fixed; inset: 0; display: grid; place-items: center; background: rgba(47,125,225,.08); font-size: 18px; color: #1d4f9a; z-index: 50; pointer-events: none; }
 .setup .partrow.option { align-items: flex-start; } .setup .badtext { color: var(--err); }
 .setup .check { display: flex; gap: 6px; align-items: center; margin: 4px 0 6px; }
+/* over the 3D view while an action runs: no new drag can start from the state before it */
+.busyveil { position: absolute; inset: 0; z-index: 20; display: grid; place-items: center; cursor: progress;
+  background: rgba(246, 247, 249, .35); color: #1d4f9a; font-size: 14px; }
+.setup .fitbad { color: var(--err); }

@@ -7,3 +7,5 @@ ui/node_modules/
 ui/dist/
 parts/
 .DS_Store
+seed_runs/*/
+*.bak

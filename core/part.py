@@ -10,6 +10,8 @@ The chain, each step on the result of the last:
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,6 +22,9 @@ from build123d import Cylinder, Location, Shape, Solid, import_step
 from core.element import Severity, ValidationIssue
 from core.frames import Frame, rigid
 from core.occ import fuse, heal, placed, solids_volume, transformed
+from core.partmesh import PartMesh, Placed
+from core.partmesh import bbox as mesh_bbox
+from core.partmesh import placed as place_mesh
 
 UNIT_MM = {"mm": 1.0, "cm": 10.0, "m": 1000.0, "inch": 25.4}
 _STEP_PREFIX = {".MILLI.": "mm", ".CENTI.": "cm", "$": "m"}
@@ -84,6 +89,7 @@ class SourcePart:
 
 
 _CACHE: dict[tuple, SourcePart] = {}
+_CACHE_FILES = 16                  # part files (or versions of one) kept read
 
 
 def load_source(path: Path, units: str = "auto") -> SourcePart:
@@ -122,6 +128,8 @@ def load_source(path: Path, units: str = "auto") -> SourcePart:
         issues.append(ValidationIssue("part.many_solids", Severity.WARNING,
                                       f"{path.name} holds {len(shape.solids())} solids", instances=("part",)))
     _CACHE[key] = SourcePart(shape, declared, issues)
+    while len(_CACHE) > _CACHE_FILES:                     # oldest first: a part file read long ago
+        del _CACHE[next(iter(_CACHE))]
     return _CACHE[key]
 
 
@@ -179,6 +187,20 @@ class PartModel:
     issues: list[ValidationIssue] = field(default_factory=list)
     cavities: dict[str, Shape] = field(default_factory=dict)    # more parts: copies, or other files
     cavity_volumes: dict[str, float] = field(default_factory=dict)   # as cast, mm3
+    # per solid ("part", "part.<cavity id>"): the shape it is placed from (at pattern size, read and
+    # meshed once per file) with its key, and its mesh where the mold has it
+    bases: dict[str, tuple[str, Shape]] = field(default_factory=dict)
+    placed: dict[str, Placed] = field(default_factory=dict)
+    key: str = ""                      # changes whenever any of the part's solids changes or moves
+
+    def bbox_of(self, name: str):
+        """A solid's bounding box ("part", "part.<cavity id>"), from its mesh: an exact box takes
+        seconds on a large part."""
+        return self.placed[name].bbox() if name in self.placed else _bbox(self.cavities.get(name[5:], self.shape))
+
+    def metal_placed(self) -> list[Placed]:
+        """Every cavity's mesh where the mold has it (for fast queries; see core.partmesh)."""
+        return list(self.placed.values())
 
     @property
     def metal(self) -> Shape:
@@ -194,6 +216,34 @@ def _bbox(shape: Shape):
     return (tuple(b.min), tuple(b.max))
 
 
+@dataclass
+class _Base:
+    key: str
+    shape: Shape                       # as cast (machining on), scaled for shrinkage, not placed
+    volume_mm3: float                  # as cast, unscaled
+    issues: list[ValidationIssue]
+    mesh: PartMesh
+
+
+_BASES: dict[tuple, _Base] = {}
+
+
+def _base(path: Path, units: str, machining: list, scale: float) -> _Base:
+    """A part file made ready to place, kept: reading, healing, machining stock, the volume, the scale
+    and the mesh are the same for every placement (on a large part each takes seconds)."""
+    src = load_source(path, units)
+    k = (str(path), path.stat().st_mtime_ns, units, json.dumps(machining, sort_keys=True), round(scale, 12))
+    b = _BASES.get(k)
+    if b is None:
+        as_cast, mi = add_machining(src.shape, machining)
+        shape = transformed(as_cast, np.eye(4), scale=scale) if scale != 1.0 else as_cast
+        b = _BASES[k] = _Base(hashlib.sha1(repr(k).encode()).hexdigest(), shape, solids_volume(as_cast), mi,
+                              PartMesh(shape))
+        while len(_BASES) > _CACHE_FILES:
+            del _BASES[next(iter(_BASES))]
+    return b
+
+
 def load_part(doc, shrinkage_pct: float | None = None) -> PartModel | None:
     """The document's part (and cores) in the mold frame, or None if it has none.
     shrinkage_pct: the preset's value, used when the document leaves it null."""
@@ -202,8 +252,6 @@ def load_part(doc, shrinkage_pct: float | None = None) -> PartModel | None:
         return None
     src = load_source(doc.part_path(), pdef.get("units", "auto"))
     issues = list(src.issues)
-    as_cast, mi = add_machining(src.shape, pdef.get("machining", []))
-    issues += mi
     shrink = pdef.get("shrinkage_pct")
     if shrink is None:
         shrink = shrinkage_pct
@@ -213,9 +261,13 @@ def load_part(doc, shrinkage_pct: float | None = None) -> PartModel | None:
                                       "no shrinkage allowance in the document or the preset: pattern at casting size",
                                       instances=("part",)))
     s = 1.0 + shrink / 100.0
+    main = _base(doc.part_path(), pdef.get("units", "auto"), pdef.get("machining", []), s)
+    issues += main.issues
     m = doc.part_transform()
     moved = s != 1.0 or not np.allclose(m, np.eye(4))
-    shape = transformed(as_cast, m, scale=s) if moved else as_cast
+    shape = transformed(main.shape, m) if not np.allclose(m, np.eye(4)) else main.shape
+    bases = {"part": (main.key, main.shape)}
+    meshes = {"part": place_mesh(main.mesh, m)}
     ports = {p["id"]: Frame.from_dict(p["frame"]) for p in pdef.get("ports", [])}
     cores = {}
     for c in pdef.get("cores", []):
@@ -231,22 +283,31 @@ def load_part(doc, shrinkage_pct: float | None = None) -> PartModel | None:
     for cv in pdef.get("cavities", []):
         t = cv["transform"]
         cm = rigid(t.get("rotation"), t.get("translation", (0, 0, 0)))
+        name = f"part.{cv['id']}"
         if cv.get("source"):                     # another part file, placed on its own (no machining, no cores)
             try:
-                other = load_source((doc.base_dir / cv["source"]).resolve(), cv.get("units", "auto"))
+                other_path = (doc.base_dir / cv["source"]).resolve()
+                other = load_source(other_path, cv.get("units", "auto"))
+                ob = _base(other_path, cv.get("units", "auto"), [], s)
             except Exception as e:                              # noqa: BLE001
                 issues.append(ValidationIssue("part.cavity_failed", Severity.ERROR, f"part '{cv['id']}': {e}",
                                               instances=("part",)))
                 continue
             issues += [ValidationIssue(**{**i.__dict__, "message": f"{cv['id']}: {i.message}"}) for i in other.issues]
-            cavities[cv["id"]] = transformed(other.shape, cm, scale=s)
-            cavity_volumes[cv["id"]] = solids_volume(other.shape)
+            cavities[cv["id"]] = transformed(ob.shape, cm)
+            cavity_volumes[cv["id"]] = ob.volume_mm3
+            bases[name] = (ob.key, ob.shape)
+            meshes[name] = place_mesh(ob.mesh, cm)
             continue
         cavities[cv["id"]] = transformed(shape, cm)
-        cavity_volumes[cv["id"]] = solids_volume(as_cast)
+        cavity_volumes[cv["id"]] = main.volume_mm3
+        bases[name] = (main.key, main.shape)
+        meshes[name] = place_mesh(main.mesh, cm @ m)
         cores.update({f"{k}.{cv['id']}": transformed(v, cm) for k, v in list(cores.items()) if "." not in k})
-    allshapes = [shape, *cavities.values()]
-    lo = np.min([_bbox(x)[0] for x in allshapes], axis=0)
-    hi = np.max([_bbox(x)[1] for x in allshapes], axis=0)
-    return PartModel(doc.part_path(), shape, solids_volume(as_cast), (tuple(lo), tuple(hi)), src.unit, shrink,
-                     m @ np.diag([s, s, s, 1.0]), src.shape, ports, cores, issues, cavities, cavity_volumes)
+    lo, hi = mesh_bbox(list(meshes.values()))
+    key = hashlib.sha1(repr(([(n, b[0]) for n, b in bases.items()],
+                             [np.round(p.m, 9).tobytes() for p in meshes.values()],
+                             json.dumps(pdef.get("cores", []), sort_keys=True))).encode()).hexdigest()
+    return PartModel(doc.part_path(), shape, main.volume_mm3, (lo, hi), src.unit, shrink,
+                     m @ np.diag([s, s, s, 1.0]), src.shape, ports, cores, issues, cavities, cavity_volumes,
+                     bases, meshes, key)

@@ -26,7 +26,9 @@ export type ElementState = {
   instance: string; type: string; name: string | null; built: boolean;
   params: Record<string, unknown>; derived: Record<string, number>; solid: string | null; ports: Port[];
 };
-export type MeshRef = { name: string; kind: string; url: string };
+// matrix: where the mold has this mesh (row-major 4x4, mm), when it is sent unplaced (a part: meshed
+// once per file, moved by this matrix rather than meshed again)
+export type MeshRef = { name: string; kind: string; url: string; matrix?: number[] | null };
 export type DesignState = {
   id: string; path: string | null; document: any; can_undo: boolean; can_redo: boolean;
   elements: ElementState[];
@@ -38,28 +40,77 @@ export type DesignState = {
   parts: PartInBox[];
   saved: string | null; save_error: string | null; resumed: boolean;
   parting_outline: [number, number][][];
+  notes?: string[];             // about the last action, not issues (e.g. a runner that could not be gated again)
 };
 export type PartInBox = { id: string; name: string; kind: "main" | "copy" | "file"; bbox: [Vec3, Vec3]; volume_mm3: number | null };
 
+const UNREACHABLE = "The API is not reachable (is it running on port 8000?)";
+
+/** An error's detail as text: a string, a list of strings or {message} / {msg} objects, or an object. */
+function detailText(d: unknown): string | null {
+  if (d === undefined || d === null) return null;
+  if (typeof d === "string") return d;
+  const one = (x: unknown): string => {
+    if (typeof x === "string") return x;
+    if (x && typeof x === "object") {
+      const o = x as Record<string, unknown>;
+      const m = o.message ?? o.msg;
+      if (typeof m === "string") {
+        // FastAPI's validation errors say where: loc ["body", "gate", "width"]
+        const loc = Array.isArray(o.loc) ? o.loc.filter((l) => l !== "body").join(".") : "";
+        return loc ? `${loc}: ${m}` : m;
+      }
+    }
+    return JSON.stringify(x);
+  };
+  return Array.isArray(d) ? d.map(one).join("; ") : one(d);
+}
+
+/** fetch, then the JSON reply; a failed request throws an Error with readable text. */
+async function send(url: string, init: RequestInit): Promise<unknown> {
+  let r: Response;
+  try {
+    r = await fetch(url, init);
+  } catch {
+    throw new Error(UNREACHABLE);
+  }
+  let text = "";
+  try {
+    text = await r.text();
+  } catch {
+    throw new Error(UNREACHABLE);
+  }
+  let j: unknown = undefined;
+  if (text.trim()) {
+    try {
+      j = JSON.parse(text);
+    } catch { /* not JSON: a proxy or server error page */ }
+  }
+  if (!r.ok) {
+    const detail = j && typeof j === "object" ? detailText((j as Record<string, unknown>).detail) : null;
+    if (detail) throw new Error(detail);
+    // the dev server's proxy answers 500 with no body (or 502-504) when the API is down
+    if ((r.status === 500 && !text.trim()) || r.status === 502 || r.status === 503 || r.status === 504) throw new Error(UNREACHABLE);
+    throw new Error(`${r.status} ${r.statusText}${text.trim() ? `: ${text.trim().slice(0, 300)}` : ""}`);
+  }
+  if (j === undefined) throw new Error(`The API's reply to ${url} was not JSON`);
+  return j;
+}
+
 async function call<T>(method: string, url: string, body?: unknown): Promise<T> {
-  const r = await fetch(url, {
+  return (await send(url, {
     method,
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  const j = await r.json();
-  if (!r.ok) throw new Error(typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail));
-  return j as T;
+  })) as T;
 }
 
 /** Send a part file to the API; it is saved under parts/ and its path comes back. */
 async function upload(file: File): Promise<string> {
-  const r = await fetch(`/api/upload?name=${encodeURIComponent(file.name)}`, {
+  const j = (await send(`/api/upload?name=${encodeURIComponent(file.name)}`, {
     method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file,
-  });
-  const j = await r.json();
-  if (!r.ok) throw new Error(typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail));
-  return j.path as string;
+  })) as { path: string };
+  return j.path;
 }
 
 export type FitOption = {
@@ -71,6 +122,8 @@ export type BoxProposal = {
   standard: string | null; shift: Vec3; need: Record<string, number>;
 };
 export type Clearances = { sides: number; below: number; above: number; extra: number; step: number };
+/** The ingate put wherever a runner runs into a part. */
+export type GateSpec = { width: number; thickness: number; length: number; side: string };
 
 export const api = {
   upload,
@@ -98,10 +151,12 @@ export const api = {
   placeSprue: (id: string, s: { x: number; y: number; d_top: number; d_bottom: number }) =>
     call<DesignState>("POST", `/api/designs/${id}/workflow/sprue`, s),
   drawRunner: (id: string, r: {
-    side: string; w_parting: number; w_far: number; height: number; points: Vec3[]; runner: string | null;
+    side: string; width: number; taper_pct: number; height: number; extension: number; points: Vec3[]; runner: string | null;
     branch?: { from: string; at: Vec3 } | null; gate?: { side: string; width: number; thickness: number; length: number } | null;
   }) =>
     call<DesignState>("POST", `/api/designs/${id}/workflow/runner`, r),
+  /** the automatic ingate's size on every runner, in one undo step; null: no automatic ingates */
+  setGate: (id: string, gate: GateSpec | null) => call<DesignState>("POST", `/api/designs/${id}/workflow/gate`, { gate }),
   drawIngate: (id: string, g: { runner: string; start: [number, number]; end: [number, number]; side: string;
                                 width: number; thickness: number; ingate: string | null }) =>
     call<DesignState>("POST", `/api/designs/${id}/workflow/ingate`, g),
@@ -115,6 +170,10 @@ export const api = {
     call<DesignState>("POST", `/api/designs/${id}/workflow/feeder`, f),
   addVent: (id: string, v: { x: number; y: number; d: number }) => call<DesignState>("POST", `/api/designs/${id}/workflow/vent`, v),
   removeAny: (id: string, instance: string) => call<DesignState>("POST", `/api/designs/${id}/workflow/remove`, { instance }),
+  /** move a runner up or down within its half: level is its parting-plane face's height (0 on the
+   * plane, negative in the drag); its branches and ingates go with it, the sprue follows */
+  setRunnerLevel: (id: string, runner: string, level: number) =>
+    call<DesignState>("POST", `/api/designs/${id}/workflow/runner_level`, { runner, level }),
   removeRunner: (id: string, runner: string) => call<DesignState>("POST", `/api/designs/${id}/workflow/remove_runner`, { runner }),
   patch: (id: string, ops: unknown[]) => call<DesignState>("POST", `/api/designs/${id}/patch`, ops),
   undo: (id: string) => call<DesignState>("POST", `/api/designs/${id}/undo`),

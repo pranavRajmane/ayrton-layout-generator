@@ -37,12 +37,16 @@ export function MoldBox({ box }: { box: Box }) {
 }
 
 /** Wraps a part's meshes; while active the user drags it with the arrows, which
- * sit on the part's centre. On release the move is sent and the wrapper snaps
- * back (the new meshes arrive moved). */
-export function PartMover({ active, centre, resetKey, onMove, children }: {
-  active: boolean; centre: Vec3; resetKey: string; onMove: (delta: Vec3) => void; children: ReactNode;
+ * sit on the part's centre. On release the move is sent; the wrapper stays where it
+ * was dropped until the new meshes arrive moved (then it snaps back), or goes back
+ * at once if the move failed. */
+export function PartMover({ active, centre, resetKey, onMove, children, zOnly = false }: {
+  active: boolean; centre: Vec3; resetKey: string; onMove: (delta: Vec3) => void | Promise<boolean>; children: ReactNode;
+  zOnly?: boolean;                                  // only up and down (a runner)
 }) {
   const ref = useRef<THREE.Group>(null!);
+  const centreNow = useRef(centre);
+  centreNow.current = centre;
   const [ready, setReady] = useState(false);
   useEffect(() => setReady(true), []);
   useEffect(() => {
@@ -59,11 +63,16 @@ export function PartMover({ active, centre, resetKey, onMove, children }: {
           object={ref.current}
           mode="translate"
           size={0.9}
+          showX={!zOnly}
+          showY={!zOnly}
           onMouseUp={() => {
             const p = ref.current.position;
-            const d: Vec3 = [Math.round(p.x - centre[0]), Math.round(p.y - centre[1]), Math.round(p.z - centre[2])];
-            if (d.some((v) => v !== 0)) onMove(d);
-            else p.set(...centre);
+            const d: Vec3 = zOnly ? [0, 0, Math.round(p.z - centre[2])]
+              : [Math.round(p.x - centre[0]), Math.round(p.y - centre[1]), Math.round(p.z - centre[2])];
+            if (d.some((v) => v !== 0)) {
+              const sent = onMove(d);
+              if (sent instanceof Promise) sent.then((ok) => { if (!ok) ref.current?.position.set(...centreNow.current); });
+            } else p.set(...centre);
           }}
         />
       )}
@@ -121,6 +130,30 @@ function snap(p: XY, prev: XY | null, free: boolean): XY {
 }
 
 const dist = (a: XY, b: XY) => Math.hypot(b[0] - a[0], b[1] - a[1]);
+
+/** A drag ends on pointerup anywhere (it is committed), or on pointercancel or the window losing
+ * focus (it is dropped). end is called with the latest render's closure. */
+function useDragEnd(end: (commit: boolean) => void) {
+  const ref = useRef(end);
+  ref.current = end;
+  useEffect(() => {
+    const up = () => ref.current(true);
+    const cancel = () => ref.current(false);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", cancel);
+    window.addEventListener("blur", cancel);
+    return () => {
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", cancel);
+      window.removeEventListener("blur", cancel);
+    };
+  }, []);
+}
+
+/** Run done when p (if it is a promise) settles. */
+const whenSettled = (p: unknown, done: () => void) => {
+  if (p instanceof Promise) p.then(done, done);
+};
 
 // ---- alignment: snap onto the x or y of what is already placed, and show it --------------------
 
@@ -226,14 +259,14 @@ function Handle({ at, r, color, onDown, onClick, title }: {
   );
 }
 
-export type SprueSketch = { at: XY | null; dTop: number; dBottom: number; canPlace: boolean; onPlace: (p: XY) => void };
+export type SprueSketch = { at: XY | null; dTop: number; dBottom: number; canPlace: boolean; onPlace: (p: XY) => void | Promise<unknown> };
 export type RunnerSketch = {
   width: number;                // at the parting plane
   points: XY[];                 // after the start under the sprue
   drawing: boolean;
   onAdd: (p: XY) => void;
   onFinish: (at?: XY) => void;     // at: where a double-click finished it
-  onChange: (points: XY[]) => void;   // an edit of the placed runner (drag, insert, delete)
+  onChange: (points: XY[]) => void | Promise<unknown>;   // an edit of the placed runner (drag, insert, delete)
   start?: XY | null;                  // where it starts (a branch point); default the sprue; null: not chosen yet
   selected: number | null;
   onSelect: (i: number | null) => void;
@@ -255,11 +288,13 @@ export function PlanSketch({ box, sprue, runner, others = [], onPickOther, onCur
   // The drag lives in a ref: a quick click can end (pointerup) before React has re-rendered
   // after it began, so the end must not depend on state from that render.
   type Drag = { what: "sprue" } | { what: "point"; i: number };
-  const live = useRef<{ drag: Drag | null; at: XY | null; from: XY | null; edit: XY[] | null }>(
-    { drag: null, at: null, from: null, edit: null });
+  type Live = { drag: Drag | null; at: XY | null; from: XY | null; edit: XY[] | null };
+  const live = useRef<Live>({ drag: null, at: null, from: null, edit: null });
+  // a drop sent to the API: drawn where it was dropped until the new state (or an error) is back
+  const held = useRef<Live | null>(null);
   const [, bump] = useState(0);
   const redraw = () => bump((n) => n + 1);
-  const { drag, at: dragAt, edit } = live.current;
+  const { drag, at: dragAt, edit } = live.current.drag ? live.current : held.current ?? live.current;
 
   const own = runner?.start === undefined ? sprue.at : runner.start;     // the sprue, or a branch point
   const start: XY | null = drag?.what === "sprue" && dragAt && runner?.start === undefined ? dragAt : own;
@@ -274,27 +309,27 @@ export function PlanSketch({ box, sprue, runner, others = [], onPickOther, onCur
     live.current = { drag: d, at, from: at, edit: d.what === "point" ? points ?? runner?.points ?? null : null };
     redraw();
   };
-  const endDrag = () => {
+  const endDrag = (commit: boolean) => {
     const g = live.current;
     if (!g.drag) return;
     const inserted = !!g.edit && !!runner && g.edit.length !== runner.points.length;   // a bend from a white dot
     const moved = !!g.at && (inserted || !g.from || dist(g.at, g.from) > 0.5);
-    if (moved && g.at) {
-      const d = g.drag, p = g.at;
-      if (d.what === "sprue") sprue.onPlace(p);
-      else if (runner && g.edit) runner.onChange(g.edit.map((q, i) => (i === d.i ? p : q)));
-    }
     live.current = { drag: null, at: null, from: null, edit: null };
     if (controls) controls.enabled = true;
+    setLined({ gx: null, gy: null });
+    if (commit && moved && g.at) {
+      const d = g.drag, p = g.at;
+      const sent = d.what === "sprue" ? sprue.onPlace(p)
+        : runner && g.edit ? runner.onChange(g.edit.map((q, i) => (i === d.i ? p : q))) : undefined;
+      if (sent instanceof Promise) {
+        const h = { ...g };
+        held.current = h;
+        whenSettled(sent, () => { if (held.current === h) { held.current = null; redraw(); } });
+      }
+    }
     redraw();
   };
-  const endRef = useRef(endDrag);
-  endRef.current = endDrag;
-  useEffect(() => {
-    const up = () => endRef.current();
-    window.addEventListener("pointerup", up);
-    return () => window.removeEventListener("pointerup", up);
-  }, []);
+  useDragEnd(endDrag);
 
   const aligned = (e: ThreeEvent<PointerEvent | MouseEvent>, prev: XY | null, skip?: XY | null) =>
     align([e.point.x, e.point.y], prev, e.nativeEvent.altKey, guides, mmPerPx, skip);
@@ -310,11 +345,12 @@ export function PlanSketch({ box, sprue, runner, others = [], onPickOther, onCur
       <mesh
         position={[0, 0, 0.1]}
         onPointerMove={(e) => {
-          const prev = drag?.what === "point" ? chain[drag.i] : drawingNow ? last : null;
-          const a = aligned(e, drag ? (drag.what === "point" ? prev : null) : prev, live.current.from);
+          const dr = live.current.drag;                               // the drag in progress, not a held drop
+          const prev = dr?.what === "point" ? chain[dr.i] : drawingNow ? last : null;
+          const a = aligned(e, dr ? (dr.what === "point" ? prev : null) : prev, live.current.from);
           const p = a.p;
           setLined({ gx: a.gx, gy: a.gy });
-          if (drag) { live.current.at = p; redraw(); }
+          if (dr) { live.current.at = p; redraw(); }
           setCursor(p);
           onCursor(p);
         }}
@@ -420,8 +456,8 @@ const OUTLINE_SNAP_MM = 8;
 export function IngateSketch({ box, runners, ingates, width, outline, selected, onSelect, onCreate, onEdit, onCursor, guides }: {
   box: Box; runners: RunnerLine[]; ingates: IngateLine[]; width: number | null; outline: XY[][];
   selected: string | null; onSelect: (id: string | null) => void;
-  onCreate: (runner: string, start: XY, end: XY) => void;
-  onEdit: (id: string, runner: string, start: XY, end: XY) => void;
+  onCreate: (runner: string, start: XY, end: XY) => void | Promise<unknown>;
+  onEdit: (id: string, runner: string, start: XY, end: XY) => void | Promise<unknown>;
   onCursor: (p: XY | null) => void; guides?: Guides;
 }) {
   const { controls } = useThree() as any;
@@ -430,6 +466,7 @@ export function IngateSketch({ box, runners, ingates, width, outline, selected, 
   const [L, W] = box.size;
   type Drag = { what: "new" | "start" | "end"; id?: string; runner: string; start: XY; end: XY };
   const live = useRef<Drag | null>(null);
+  const held = useRef<Drag | null>(null);            // a drop sent to the API, drawn until it answers
   const [, bump] = useState(0);
   const redraw = () => bump((n) => n + 1);
 
@@ -460,29 +497,31 @@ export function IngateSketch({ box, runners, ingates, width, outline, selected, 
     onSelect(d.id ?? null);
     redraw();
   };
-  const end = () => {
+  const end = (commit: boolean) => {
     const d = live.current;
     if (!d) return;
     live.current = null;
     if (controls) controls.enabled = true;
-    if (dist(d.start, d.end) > 3) {
-      if (d.what === "new") onCreate(d.runner, d.start, d.end);
+    setLined({ gx: null, gy: null });
+    if (commit && dist(d.start, d.end) > 3) {
+      let sent: void | Promise<unknown> = undefined;
+      if (d.what === "new") sent = onCreate(d.runner, d.start, d.end);
       else {
-        const g = ingates.find((x) => x.id === d.id)!;
-        if (dist(g.start, d.start) > 0.5 || dist(g.end, d.end) > 0.5 || g.runner !== d.runner) onEdit(d.id!, d.runner, d.start, d.end);
+        const g = ingates.find((x) => x.id === d.id);       // gone (undone, removed) while dragged: nothing to edit
+        if (g && d.id && (dist(g.start, d.start) > 0.5 || dist(g.end, d.end) > 0.5 || g.runner !== d.runner)) {
+          sent = onEdit(d.id, d.runner, d.start, d.end);
+        }
+      }
+      if (sent instanceof Promise) {
+        held.current = d;
+        whenSettled(sent, () => { if (held.current === d) { held.current = null; redraw(); } });
       }
     }
     redraw();
   };
-  const endRef = useRef(end);
-  endRef.current = end;
-  useEffect(() => {
-    const up = () => endRef.current();
-    window.addEventListener("pointerup", up);
-    return () => window.removeEventListener("pointerup", up);
-  }, []);
+  useDragEnd(end);
 
-  const d = live.current;
+  const d = live.current ?? held.current;
   const shown = ingates.map((g) => (d && d.id === g.id ? { ...g, start: d.start, end: d.end, runner: d.runner } : g));
 
   return (
@@ -544,12 +583,13 @@ export type PartFoot = { id: string; name: string; lo: XY; hi: XY };
  * centre or edge, the box's centre lines or walls, within a few pixels; the lines it took are shown. */
 export function PartSketch({ box, parts, selected, onSelect, onMove, guides }: {
   box: Box; parts: PartFoot[]; selected: string | null; onSelect: (id: string) => void;
-  onMove: (id: string, d: Vec3) => void; guides?: Guides;
+  onMove: (id: string, d: Vec3) => void | Promise<unknown>; guides?: Guides;
 }) {
   const { controls } = useThree() as any;
   const mmPerPx = useMmPerPx();
   const [L, W] = box.size;
   const live = useRef<{ id: string; from: XY; d: XY; gx: number | null; gy: number | null } | null>(null);
+  const held = useRef<{ id: string; d: XY } | null>(null);     // a move sent to the API, drawn until it answers
   const [, bump] = useState(0);
   const redraw = () => bump((n) => n + 1);
 
@@ -573,23 +613,25 @@ export function PartSketch({ box, parts, selected, onSelect, onMove, guides }: {
     return { d: [dx, dy], gx, gy };
   };
 
-  const end = () => {
+  const end = (commit: boolean) => {
     const g = live.current;
     if (!g) return;
     live.current = null;
     if (controls) controls.enabled = true;
-    if (Math.hypot(g.d[0], g.d[1]) > 0.5) onMove(g.id, [g.d[0], g.d[1], 0]);
+    if (commit && Math.hypot(g.d[0], g.d[1]) > 0.5) {
+      const sent = onMove(g.id, [g.d[0], g.d[1], 0]);
+      if (sent instanceof Promise) {
+        const h = { id: g.id, d: g.d };
+        held.current = h;
+        whenSettled(sent, () => { if (held.current === h) { held.current = null; redraw(); } });
+      }
+    }
     redraw();
   };
-  const endRef = useRef(end);
-  endRef.current = end;
-  useEffect(() => {
-    const up = () => endRef.current();
-    window.addEventListener("pointerup", up);
-    return () => window.removeEventListener("pointerup", up);
-  }, []);
+  useDragEnd(end);
 
   const g = live.current;
+  const off = g ?? held.current;
   return (
     <>
       <mesh position={[0, 0, box.top + 2]}
@@ -606,7 +648,7 @@ export function PartSketch({ box, parts, selected, onSelect, onMove, guides }: {
       </mesh>
       {parts.map((p) => {
         const [w, h] = [p.hi[0] - p.lo[0], p.hi[1] - p.lo[1]];
-        const d = g && g.id === p.id ? g.d : [0, 0];
+        const d = off && off.id === p.id ? off.d : [0, 0];
         const c: Vec3 = [(p.lo[0] + p.hi[0]) / 2 + d[0], (p.lo[1] + p.hi[1]) / 2 + d[1], box.top + 3];
         const on = p.id === selected;
         return (
@@ -665,16 +707,19 @@ export function PlaceSketch({ box, d, onPlace, onCursor, guides }: {
   const mmPerPx = useMmPerPx();
   const [L, W] = box.size;
   const [at, setAt] = useState<{ p: XY; gx: number | null; gy: number | null } | null>(null);
+  const here = (e: ThreeEvent<PointerEvent | MouseEvent>) => align([e.point.x, e.point.y], null, e.nativeEvent.altKey, guides, mmPerPx);
+  const show = (e: ThreeEvent<PointerEvent>) => {
+    const a = here(e);
+    setAt(a);
+    onCursor(a.p);
+  };
   return (
     <>
       <mesh position={[0, 0, box.top + 1]}
-        onPointerMove={(e) => {
-          const a = align([e.point.x, e.point.y], null, e.nativeEvent.altKey, guides, mmPerPx);
-          setAt(a);
-          onCursor(a.p);
-        }}
+        onPointerMove={show}
+        onPointerDown={show}                      // a click with no move before it still has its place
         onPointerOut={() => { setAt(null); onCursor(null); }}
-        onClick={(e) => { if (e.delta <= 4 && at) onPlace(at.p); }}>
+        onClick={(e) => { if (e.delta <= 4) onPlace(here(e).p); }}>
         <planeGeometry args={[L, W]} />
         <meshBasicMaterial transparent opacity={0} depthWrite={false} />
       </mesh>

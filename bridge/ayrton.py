@@ -80,6 +80,20 @@ def _upstream_half_space(res: RegenResult, frame):
     return placed(Box(big, big, big, align=(Align.MAX, Align.CENTER, Align.CENTER)), frame.matrix())
 
 
+def _drop_old_regions(proj: Path, keep: set[str]) -> None:
+    """A region file an earlier export into this folder wrote (listed in its manifest) whose solid is gone
+    now (an element removed since) is deleted, so the folder holds only this design's regions."""
+    man = proj / "regions" / "manifest.json"
+    try:
+        old = json.loads(man.read_text()).get("regions", [])
+    except (OSError, ValueError):
+        return
+    for r in old:
+        f = proj / str(r.get("file", ""))
+        if r.get("name") not in keep and f.suffix == ".stl" and f.parent == proj / "regions":
+            f.unlink(missing_ok=True)
+
+
 def export(res: RegenResult, out_dir: str | Path, materials_json: str | Path | None = None,
            pour: dict | None = None, allow_errors: bool = False) -> dict:
     """Write the project; returns the manifest.  Refuses a design with errors unless allow_errors."""
@@ -112,6 +126,7 @@ def export(res: RegenResult, out_dir: str | Path, materials_json: str | Path | N
     inlet = placed(section_face(port.section, port.frame), shift)
     export_stl(inlet, proj / "geometry" / "inlet.stl", **STL_TOL)
 
+    _drop_old_regions(proj, set(named))
     regions = []
     for name, s in named.items():
         f = proj / "regions" / f"{name}.stl"

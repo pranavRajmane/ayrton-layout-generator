@@ -9,7 +9,7 @@ from __future__ import annotations
 UNITS = {"length": "mm", "mass": "kg", "time": "s", "temperature": "degC"}
 
 # Units a Param may declare; anything else is rejected by the registry.
-PARAM_UNITS = {"mm", "mm2", "mm3", "deg", "kg", "s", "degC", "m/s", "kg/s", "-", ""}
+PARAM_UNITS = {"mm", "mm2", "mm3", "deg", "kg", "s", "degC", "m/s", "kg/s", "%", "-", ""}
 
 MM3_PER_M3 = 1e9
 MM2_PER_M2 = 1e6

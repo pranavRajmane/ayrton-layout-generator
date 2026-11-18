@@ -12,15 +12,17 @@ import {
  * sketch the sprue and runner on the parting plane (in plan view). */
 export type SetupView =
   | { mode: "none" }
-  | { mode: "fit"; part: string; onSelectPart: (id: string) => void; onMovePart: (d: Vec3, id?: string) => void; guides?: Guides }
+  | { mode: "fit"; part: string; onSelectPart: (id: string) => void; onMovePart: (d: Vec3, id?: string) => Promise<boolean>; guides?: Guides }
   | { mode: "preview"; move: number[][]; box: Box | null }        // a suggested fit, shown before it is applied
-  | { mode: "place"; hint: string; d: number; onPlace: (p: [number, number]) => void; guides?: Guides }
+  | { mode: "place"; hint: string; d: number; onPlace: (p: [number, number]) => void | Promise<unknown>; guides?: Guides }
   | { mode: "plan"; sprue: SprueSketch; runner: RunnerSketch | null; hint: string;
-      others: OtherRunner[]; onPickOther: (id: string) => void; guides?: Guides }
+      others: OtherRunner[]; onPickOther: (id: string) => void; guides?: Guides;
+      // in 3D: the selected runner (and what hangs off it, by instance) moved up and down with an arrow at
+      lift?: { ids: string[]; at: Vec3; onLift: (dz: number) => void | Promise<boolean> } }
   | { mode: "ingates"; hint: string; runners: RunnerLine[]; ingates: IngateLine[]; width: number | null;
       selected: string | null; onSelect: (id: string | null) => void;
-      onCreate: (runner: string, start: [number, number], end: [number, number]) => void;
-      onEdit: (id: string, runner: string, start: [number, number], end: [number, number]) => void; guides?: Guides };
+      onCreate: (runner: string, start: [number, number], end: [number, number]) => void | Promise<unknown>;
+      onEdit: (id: string, runner: string, start: [number, number], end: [number, number]) => void | Promise<unknown>; guides?: Guides };
 
 /** The part (main "part" or a cavity id) a part or core mesh belongs to. */
 function partOf(name: string): string {
@@ -45,8 +47,21 @@ class SkipOnError extends Component<{ children: ReactNode }, { failed: boolean }
   }
 }
 
+// glTF from OCCT is in metres and Y-up; the groups the solids sit in turn it to mm, Z-up
+const GLTF_TO_MM = new THREE.Matrix4().compose(
+  new THREE.Vector3(), new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI / 2, 0, 0)), new THREE.Vector3(1000, 1000, 1000));
+const MM_TO_GLTF = GLTF_TO_MM.clone().invert();
+
+/** A mesh's placement (mold frame, mm) as seen from inside those groups. */
+function placement(m: number[]): THREE.Matrix4 {
+  const M = new THREE.Matrix4().set(...(m as [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number]));
+  return MM_TO_GLTF.clone().multiply(M).multiply(GLTF_TO_MM);
+}
+
 function Solid({ mesh, selected, onPick }: { mesh: MeshRef; selected: boolean; onPick: ((p: Vec3) => void) | null }) {
   const { scene } = useGLTF(mesh.url);
+  const matrixKey = mesh.matrix ? mesh.matrix.join(",") : "";
+  const local = useMemo(() => (mesh.matrix ? placement(mesh.matrix) : null), [matrixKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const obj = useMemo(() => {
     const o = scene.clone(true);
     const base = COLORS[mesh.kind] ?? "#888";
@@ -64,7 +79,7 @@ function Solid({ mesh, selected, onPick }: { mesh: MeshRef; selected: boolean; o
     });
     return o;
   }, [scene, selected, mesh.kind]);
-  return (
+  const shown = (
     <primitive
       object={obj}
       onClick={
@@ -76,6 +91,7 @@ function Solid({ mesh, selected, onPick }: { mesh: MeshRef; selected: boolean; o
       }
     />
   );
+  return local ? <group matrixAutoUpdate={false} matrix={local}>{shown}</group> : shown;
 }
 
 function PortMarkers({ state }: { state: DesignState }) {
@@ -170,8 +186,11 @@ export default function Viewer({
   const planOn = plan && !!box;
   const moving = setup.mode === "fit" ? setup.part : setup.mode === "preview" ? "part" : null;
   const movingPart = state.parts?.find((p) => p.id === moving) ?? null;
-  const moved = shown.filter((m) => isPart(m) && partOf(m.name) === moving);
-  const centre: Vec3 = movingPart ? (movingPart.bbox[0].map((v, i) => (v + movingPart.bbox[1][i]) / 2) as Vec3) : [0, 0, 0];
+  const lift = setup.mode === "plan" && setup.lift && !planOn ? setup.lift : null;
+  const lifted = lift ? new Set(lift.ids.map((i) => `gating.${i}`)) : null;
+  const moved = lifted ? shown.filter((m) => lifted.has(m.name)) : shown.filter((m) => isPart(m) && partOf(m.name) === moving);
+  const centre: Vec3 = lift ? lift.at
+    : movingPart ? (movingPart.bbox[0].map((v, i) => (v + movingPart.bbox[1][i]) / 2) as Vec3) : [0, 0, 0];
   return (
     <div className="viewer">
       <Canvas camera={{ position: [400, -500, 350], up: [0, 0, 1], near: 1, far: 20000 }} onPointerMissed={() => onSelect(null)}>
@@ -188,8 +207,9 @@ export default function Viewer({
               </group>
             </group>
           ) : (
-            <PartMover active={setup.mode === "fit" && !!movingPart && !planOn} centre={centre} resetKey={moved.map((m) => m.url).join("|")}
-              onMove={(d) => setup.mode === "fit" && setup.onMovePart(d)}>
+            <PartMover active={(setup.mode === "fit" && !!movingPart && !planOn) || !!lift} zOnly={!!lift} centre={centre}
+              resetKey={moved.map((m) => m.url + (m.matrix ? m.matrix.join(",") : "")).join("|")}
+              onMove={(d) => (setup.mode === "fit" ? setup.onMovePart(d) : lift ? lift.onLift(d[2]) : undefined)}>
               <group rotation={[Math.PI / 2, 0, 0]} scale={1000}>
                 {solids(moved)}
               </group>

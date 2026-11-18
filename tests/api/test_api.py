@@ -263,3 +263,36 @@ def test_cup_well_feeders_and_vent_through_the_api(tmp_path):
     assert not [i for i in st["issues"] if i["severity"] in ("error", "warning")]
     st = client.post(f"/api/designs/{sid}/workflow/remove", json={"instance": "feeder_2"}).json()
     assert not [e for e in st["document"]["elements"] if e["type"] == "neck"]
+
+
+def test_lowered_runner_is_gated_where_the_part_reaches_at_its_height(tmp_path):
+    """A narrow top (x edge -50) on the parting plane and a wide flange (x edge -80) 40-45 mm down:
+    on the plane a drag runner meets the top; lowered 30 mm it meets the flange, its ingate goes there,
+    level with it, and the sprue reaches its new floor."""
+    from build123d import Box, Location, export_step
+    part = (Box(100, 100, 20).moved(Location((0, 0, -10))) + Box(40, 40, 22).moved(Location((0, 0, -30)))
+            + Box(160, 100, 5).moved(Location((0, 0, -42.5))))
+    export_step(part, tmp_path / "flanged.step")
+    sid = client.post("/api/designs/new", json={"part": str(tmp_path / "flanged.step")}).json()["id"]
+    client.post(f"/api/designs/{sid}/workflow/box", json={"length": 500, "width": 300, "height": 300, "parting": 150})
+    lo = client.get(f"/api/designs/{sid}").json()["part"]["bbox"][0]
+    client.post(f"/api/designs/{sid}/workflow/move_part", json={"delta": [0, 0, -45 - lo[2]]})   # its top on the plane
+    client.post(f"/api/designs/{sid}/workflow/sprue", json={"x": -200, "y": 0, "d_top": 30, "d_bottom": 24})
+    st = client.post(f"/api/designs/{sid}/workflow/runner",
+                     json={"side": "drag", "w_parting": 30, "w_far": 20, "height": 25, "points": [[0, 0, 0]],
+                           "gate": {"width": 40, "thickness": 8, "length": 20, "side": "drag"}}).json()
+    g = next(e for e in st["document"]["elements"] if e["type"] == "ingate")
+    assert g["params"]["waypoints"][1][0] == pytest.approx(-50, abs=0.01)
+    r = client.post(f"/api/designs/{sid}/workflow/runner_level", json={"runner": "runner", "level": -30})
+    assert r.status_code == 200, r.text
+    st = r.json()
+    g = next(e for e in st["document"]["elements"] if e["type"] == "ingate")
+    assert g["params"]["waypoints"][1] == pytest.approx([-80, 0, -30], abs=0.01)
+    sprue = next(e for e in st["elements"] if e["instance"] == "sprue")
+    assert sprue["params"]["length"] == pytest.approx(150 + 55)
+    assert st["can_undo"]
+    st = client.post(f"/api/designs/{sid}/undo").json()                     # one undo step: back on the plane
+    g = next(e for e in st["document"]["elements"] if e["type"] == "ingate")
+    assert g["params"]["waypoints"][1] == pytest.approx([-50, 0, 0], abs=0.01)
+    r = client.post(f"/api/designs/{sid}/workflow/runner_level", json={"runner": "runner", "level": 10})
+    assert r.status_code == 422

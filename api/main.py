@@ -7,19 +7,23 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import tempfile
+import threading
 import time
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 from build123d import export_gltf
-from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi import Body, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import Response
 
 from bridge.ayrton import ExportError, export
 from core.document import DesignDocument, DocumentError, empty
+from core.element import EMBED
 from core.occ import baked
 from core import fit, moldcheck, ops, workflow
 from core.pick import gate_port, pick_face
@@ -31,7 +35,26 @@ from core.registry import REGISTRY
 REGISTRY.discover("elements")
 if os.environ.get("AYRTON_GATING_FIXTURES"):              # framework test elements, for demos before the library exists
     REGISTRY.discover("tests.fixture_elements")
-app = FastAPI(title="Ayrton gating")
+_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _one_change_at_a_time(request: Request):
+    """Requests that change a design session run one after another: two edits sent together (a drag
+    and a typed value, say) must not interleave on the document and its regenerated result. Mesh
+    downloads (GET) do not wait: they only read what a finished change left."""
+    sid = request.path_params.get("sid")
+    if request.method != "POST" or not sid:
+        yield
+        return
+    lock = _LOCKS.setdefault(sid, threading.Lock())
+    lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+app = FastAPI(title="Ayrton gating", dependencies=[Depends(_one_change_at_a_time)])
 MESH_TOL = dict(linear_deflection=0.1, angular_deflection=0.3)
 
 
@@ -40,7 +63,8 @@ class Session:
     doc: DesignDocument
     path: Path | None
     result: RegenResult | None = None
-    meshes: dict[str, tuple[str, bytes]] = field(default_factory=dict)   # name -> (key, glb)
+    meshes: dict[str, tuple[str, bytes, list | None]] = field(default_factory=dict)   # name -> (key, glb, matrix)
+    part_now: tuple[str, object] = ("", None)                             # (doc part json, PartModel) between rebuilds
     outline: tuple[str, list] = ("", [])                                 # (part mesh key, parting-plane outline)
     suggestions: tuple[str, list] = ("", [])                             # (part mesh key, fit.suggest)
     sections: dict = field(default_factory=dict)                          # (part mesh key, z) -> outline
@@ -48,10 +72,25 @@ class Session:
     save_error: str | None = None
     resumed: bool = False                                                 # opened from its saved design
     regen_ms: float = 0.0
+    backed_up: bool = False                                               # the file as opened kept as .bak
+    notes: list[str] = field(default_factory=list)                        # for the user, about the last action
 
 
 SESSIONS: dict[str, Session] = {}
-_MESH_CACHE: dict[str, bytes] = {}
+_MESH_CACHE: OrderedDict[str, bytes] = OrderedDict()     # glb by key, least recently used first
+MESH_CACHE_BYTES = 512 * 2**20                           # meshes no longer shown are dropped past this
+
+
+def _cached_glb(key: str, shape) -> bytes:
+    if key in _MESH_CACHE:
+        _MESH_CACHE.move_to_end(key)
+        return _MESH_CACHE[key]
+    glb = _MESH_CACHE[key] = _glb(shape)
+    total = sum(map(len, _MESH_CACHE.values()))
+    while total > MESH_CACHE_BYTES and len(_MESH_CACHE) > 1:
+        _, old = _MESH_CACHE.popitem(last=False)
+        total -= len(old)
+    return glb
 
 
 def _session(sid: str) -> Session:
@@ -98,16 +137,37 @@ def _regenerate(s: Session) -> None:
         shapes.update({f"part.{k}": v for k, v in res.part.cavities.items()})
     s.meshes = {}
     for name, shape in shapes.items():
+        if res.part and name in res.part.bases:
+            # a part is meshed once per file, as read (at pattern size), and the viewer places it by its
+            # matrix: moving it sends no new mesh (a large part's is seconds to make and megabytes to send)
+            bkey, base = res.part.bases[name]
+            key = hashlib.sha1(f"base|{bkey}".encode()).hexdigest()
+            s.meshes[name] = (key, _cached_glb(key, base), np.asarray(res.part.placed[name].m).ravel().tolist())
+            continue
         key = _mesh_key(name, res)
-        if key not in _MESH_CACHE:
-            _MESH_CACHE[key] = _glb(shape)
-        s.meshes[name] = (key, _MESH_CACHE[key])
+        s.meshes[name] = (key, _cached_glb(key, shape), None)
+    s.part_now = (json.dumps(s.doc.part, sort_keys=True), res.part)
     s.regen_ms = 1e3 * (time.perf_counter() - t)
 
 
-def _bb(shape) -> list:
-    b = shape.bounding_box()
+def _bb(x) -> list:
+    """[lo, hi] of a ready box (lo, hi), or of a shape: its loose box (an exact one takes seconds on a
+    large part)."""
+    if isinstance(x, tuple):
+        return [list(map(float, x[0])), list(map(float, x[1]))]
+    b = x.bounding_box(optimal=False)
     return [list(map(float, b.min)), list(map(float, b.max))]
+
+
+def _pm(s: Session):
+    """The part where the document has it now: the last rebuild's, or (moved since, before the rebuild
+    that follows) placed again from the cached part files, which is quick."""
+    from core.part import load_part
+    key = json.dumps(s.doc.part, sort_keys=True)
+    if s.part_now[0] != key:
+        shrink = s.result.preset.get("shrinkage_pct") if s.result and s.result.preset else None
+        s.part_now = (key, load_part(s.doc, shrink))
+    return s.part_now[1]
 
 
 def _parts(s: Session) -> list[dict]:
@@ -115,39 +175,48 @@ def _parts(s: Session) -> list[dict]:
     pm = s.result.part if s.result else None
     if pm is None:
         return []
-    out = [{"id": "part", "name": pm.path.name, "kind": "main", "bbox": _bb(pm.shape), "volume_mm3": pm.volume_mm3}]
+    out = [{"id": "part", "name": pm.path.name, "kind": "main", "bbox": _bb(pm.bbox_of("part")), "volume_mm3": pm.volume_mm3}]
     for c in (s.doc.part or {}).get("cavities", []):
         if c["id"] in pm.cavities:
             out.append({"id": c["id"], "name": c.get("name") or Path(c.get("source") or pm.path.name).name,
-                        "kind": "file" if c.get("source") else "copy", "bbox": _bb(pm.cavities[c["id"]]),
+                        "kind": "file" if c.get("source") else "copy", "bbox": _bb(pm.bbox_of(f"part.{c['id']}")),
                         "volume_mm3": pm.cavity_volumes.get(c["id"])})
     return out
 
 
 def _outline(s: Session) -> list:
     """The part's cut by the parting plane (z = 0), for the plan view; cached per part placement."""
-    if s.result is None or s.result.part is None or "part" not in s.meshes:
+    pm = _pm(s) if s.result is not None else None
+    if pm is None:
         return []
-    key = s.meshes["part"][0]
-    if s.outline[0] != key:
-        from core.mold import section_outline
+    if s.outline[0] != pm.key:
+        from core.partmesh import section
         # just above and just below the plane: a part face lying on it would give its inner
         # (triangle) edges, the cuts beside it only its outline
-        metal = s.result.part.metal
-        s.outline = (key, section_outline(metal, 1e-3) + section_outline(metal, -1e-3))
+        metal = pm.metal_placed()
+        s.outline = (pm.key, section(metal, 1e-3) + section(metal, -1e-3))
     return s.outline[1]
 
 
 def _changed(s: Session) -> None:
-    """After every change: regenerate, then save the design to its file (when it has one)."""
+    """After every change: regenerate, then save the design to its file (when it has one). The first
+    save of a session first keeps the file as it was opened beside it, as <name>.gating.json.bak."""
     _regenerate(s)
     if s.path is None:
         return
     try:
+        if not s.backed_up and s.path.exists():
+            shutil.copy2(s.path, s.path.with_name(s.path.name + ".bak"))
+        s.backed_up = True
         s.doc.save(s.path)
         s.saved, s.save_error = time.strftime("%H:%M:%S"), None
     except OSError as e:
         s.save_error = f"could not save {s.path}: {e.strerror or e}"
+
+
+def _take_notes(s: Session) -> list[str]:
+    notes, s.notes = s.notes, []
+    return notes
 
 
 def _state(sid: str) -> dict:
@@ -169,14 +238,14 @@ def _state(sid: str) -> dict:
             "shrinkage_pct": res.part.shrinkage_pct,
             "ports": {k: f.to_dict() for k, f in res.part.ports.items()}},
         "preset": res.preset.data if res.preset else None,
-        "saved": s.saved, "save_error": s.save_error, "resumed": s.resumed,
+        "saved": s.saved, "save_error": s.save_error, "resumed": s.resumed, "notes": _take_notes(s),
         "box": workflow.box(s.doc.data),
         "parts": _parts(s),
         "parting_outline": _outline(s),
         "flask": None if res.flask is None else [list(map(float, res.flask[0])), list(map(float, res.flask[1]))],
         "issues": [i.to_dict() for i in res.issues],
-        "meshes": [{"name": n, "kind": n.split(".", 1)[0], "url": f"/api/designs/{sid}/mesh/{n}.glb?k={k[:12]}"}
-                   for n, (k, _) in s.meshes.items()],
+        "meshes": [{"name": n, "kind": n.split(".", 1)[0], "url": f"/api/designs/{sid}/mesh/{n}.glb?k={k[:12]}",
+                    "matrix": mx} for n, (k, _, mx) in s.meshes.items()],
         "measurement_planes": res.measurement_planes(),
         "calc": res.calc.to_dict() if res.calc else None,
         "transitions": [{"connection": t.connection, "name": t.name} for t in res.transitions.values()],
@@ -236,18 +305,46 @@ def new_design(part: str = Body(...), fresh: bool = Body(False)) -> dict:
         raise HTTPException(422, f"{p.name}: a part is a STEP or STL file")
     target = p.with_name(f"{p.stem}.gating.json")
     sid = uuid.uuid4().hex[:12]
+    notes = []
     if target.exists() and not fresh:
         try:
-            SESSIONS[sid] = Session(DesignDocument.load(target), target, resumed=True)
-            _regenerate(SESSIONS[sid])
+            doc = DesignDocument.load(target)
+        except (DocumentError, ValueError, KeyError, UnicodeDecodeError) as e:
+            # not a design we can read: kept under another name, never overwritten, and a new one started
+            kept = target.with_name(f"{p.stem}.gating.unreadable-{time.strftime('%Y%m%d-%H%M%S')}.json")
+            try:
+                target.rename(kept)
+            except OSError as e2:
+                raise HTTPException(422, f"{target.name} cannot be read ({_short(e)}) and cannot be moved "
+                                         f"aside ({e2.strerror or e2}): move it yourself and open the part again") from None
+            notes.append(f"The saved design {target.name} could not be read ({_short(e)}); it was kept as "
+                         f"{kept.name} and a new design started.")
+        else:
+            s = SESSIONS[sid] = Session(doc, target, resumed=True)
+            try:
+                _regenerate(s)
+            except Exception as e:                       # noqa: BLE001 - readable but not buildable: leave the file alone
+                del SESSIONS[sid]
+                raise HTTPException(422, f"the saved design {target.name} could not be rebuilt ({_short(e)}); "
+                                         "it was left as it is") from None
             return _state(sid)
-        except (DocumentError, ValueError, KeyError):
-            pass                                          # not a design we can read: start a new one
+    elif target.exists():                                # starting over: the old design is kept, not lost
+        kept = target.with_name(f"{p.stem}.gating.previous.json")
+        try:
+            shutil.copy2(target, kept)
+            notes.append(f"The design you had was kept as {kept.name}.")
+        except OSError:
+            pass
     data = empty(p.stem)
     data["part"] = {"source": p.name}
-    SESSIONS[sid] = Session(DesignDocument(data, base_dir=p.parent), target)
-    _changed(SESSIONS[sid]) if fresh else _regenerate(SESSIONS[sid])
+    s = SESSIONS[sid] = Session(DesignDocument(data, base_dir=p.parent), target, backed_up=True, notes=notes)
+    _changed(s) if fresh else _regenerate(s)
     return _state(sid)
+
+
+def _short(e: Exception, n: int = 160) -> str:
+    m = str(e) or type(e).__name__
+    return m if len(m) <= n else m[:n] + "…"
 
 
 @app.get("/api/designs/{sid}")
@@ -290,7 +387,10 @@ def save(sid: str, path: str | None = Body(None, embed=True)) -> dict:
     target = Path(path).expanduser().resolve() if path else s.path
     if target is None:
         raise HTTPException(422, "no path to save to")
-    s.doc.save(target)
+    try:
+        s.doc.save(target)
+    except OSError as e:
+        raise HTTPException(422, f"could not save {target}: {e.strerror or e}") from None
     return {"saved": str(target)}
 
 
@@ -311,14 +411,23 @@ def export_design(sid: str, out_dir: str = Body(..., embed=True),
         return export(s.result, Path(out_dir).expanduser(), materials_json=materials_json)
     except ExportError as e:
         raise HTTPException(422, [i.to_dict() for i in e.issues]) from None
+    except OSError as e:
+        raise HTTPException(422, f"could not write the export to {out_dir}: {e.strerror or e}") from None
 
 
-def _apply(s: Session, patch: list[dict]) -> None:
+def _apply(s: Session, patch: list[dict], rebuild: bool = True) -> bool:
+    """Apply a change (one undo step) and rebuild; rebuild False: the caller rebuilds (once, after what
+    follows from it). Whether anything changed."""
     try:
-        s.doc.apply(workflow.with_sync(s.doc, patch))
+        full = workflow.with_sync(s.doc, patch)
+        if not full:                                     # nothing changes: no empty undo step
+            return False
+        s.doc.apply(full)
     except DocumentError as e:
         raise HTTPException(422, e.problems) from None
-    _changed(s)
+    if rebuild:
+        _changed(s)
+    return True
 
 
 def _part(s: Session):
@@ -427,12 +536,23 @@ def remove_element(sid: str, instance: str = Body(..., embed=True)) -> dict:
 
 # ---- the guided set-up: box, part in the box, sprue, runner ---------------------------
 
-def _workflow(s: Session, make) -> None:
+def _workflow(s: Session, make, rebuild: bool = True) -> bool:
     try:
         patch = make()
     except workflow.WorkflowError as e:
         raise HTTPException(422, str(e)) from None
-    _apply(s, patch)
+    return _apply(s, patch, rebuild)
+
+
+def _workflow_then_follow(s: Session, make, carry=frozenset()) -> None:
+    """A change that moves, adds or removes a part (or the sprue), then what follows from it (seating,
+    re-gating), rebuilt once at the end rather than after each."""
+    changed = _workflow(s, make, rebuild=False)
+    try:
+        changed = _after_part_change(s, carry) or changed
+    finally:
+        if changed:
+            _changed(s)
 
 
 @app.post("/api/designs/{sid}/workflow/box")
@@ -463,21 +583,115 @@ def _beside(s: Session, lo_x: float) -> list[float]:
     return [max(p["bbox"][1][0] for p in _parts(s)) + 20.0 - lo_x, 0.0, 0.0]
 
 
+def _part_meshes(s: Session) -> dict:
+    """Each part's mesh where the mold has it, by its id in the box ("part" or a cavity's)."""
+    pm = _pm(s) if s.result else None
+    return {} if pm is None else {("part" if n == "part" else n[5:]): p for n, p in pm.placed.items()}
+
+
+def _on_part(s: Session, pid: str) -> set[str]:
+    """Ids of what sits on part pid (its id in the box: "part" or a cavity's): the feeders, vents and
+    hand-drawn ingates whose contact point lies on it, found from the geometry."""
+    from core.partmesh import nearest
+    shapes = _part_meshes(s)
+    if pid not in shapes:
+        return set()
+    els = {e["id"]: e for e in s.doc.elements}
+    out = set()
+    for ids, point in workflow.contacts(s.doc.data):
+        reach = 2.0 + max(float(els[i]["params"].get("embed", EMBED.default)) for i in ids)
+        if nearest(shapes, point, reach) == pid:
+            out |= ids
+    return out
+
+
+def _move(s: Session, cavity: str | None, make) -> None:
+    """A part move: make(carry) gives the patch that moves the part and what sits on it; then the top
+    feeders and vents are seated again, side feeders' necks run again and the runners gated again
+    against the moved part, all in the same undo step."""
+    carry = _on_part(s, cavity or "part")
+    _workflow_then_follow(s, lambda: make(carry), carry)
+
+
+def _after_part_change(s: Session, carry=frozenset()) -> bool:
+    """Seat what moved with a part (carry) on it again, then re-gate every gated runner, merged into the
+    last undo step; what could not be done is told in the notes. Whether it changed the document (the
+    caller, _workflow_then_follow, rebuilds once)."""
+    from core.partmesh import seat
+    if s.result is None or _pm(s) is None:
+        return False
+    notes, ops = [], []
+    data = s.doc.data
+    els = {e["id"]: e for e in data["elements"]}
+    tee = {c["from"]["instance"]: c["to"]["instance"] for c in data["connections"] if c["joint"] == "tee"}
+    metal = _pm(s).metal_placed()
+    for inst in sorted(carry):
+        e = els.get(inst)
+        if e is None or e["type"] not in ("feeder", "vent"):
+            continue
+        p = e["params"]
+        try:
+            if e["type"] == "feeder" and p.get("kind") == "side":
+                neck = els.get(tee.get(inst, ""))
+                if neck is None:
+                    continue
+                n = neck["params"]
+                outline = _runner_outline(s, n["side"], float(n["thickness"]), None) or []
+                o = e["anchor"]["frame"]["origin"]
+                end = workflow.neck_end(outline, o[0], o[1], float(p["d"]), float(n["width"]), n["waypoints"][-1])
+                ops += workflow.neck_patch(s.doc, neck["id"], end)
+            else:
+                o = e["anchor"]["frame"]["origin"]
+                st = seat(metal, o[0], o[1], float(p["d"]))
+                if st is None:
+                    notes.append(f"{inst} is no longer on the part after the move: place it again")
+                    continue
+                ops += workflow.seat_patch(s.doc, inst, st["top"], st["drop"] + EMBED.default)
+                if st["misses"]:
+                    notes.append(_overhang(inst, st))
+        except workflow.WorkflowError as x:
+            notes.append(f"{inst} could not follow the part ({x}): place it again")
+    changed = False
+    if ops:
+        try:
+            s.doc.apply(ops)
+            s.doc.merge_last()
+            changed = True
+        except DocumentError as x:
+            notes.append(f"the feeders and vents could not follow the part: {'; '.join(x.problems)}")
+    try:
+        patch, failed = workflow.regate_patch(s.doc, lambda p: _runner_outline(
+            s, p["side"], p["height"], {"thickness": p["gate_thickness"], "side": p.get("gate_side", "drag")},
+            p.get("level", 0.0)))
+        notes += failed
+        if patch:
+            s.doc.apply(patch)
+            s.doc.merge_last()
+            changed = True
+    except DocumentError as x:
+        notes.append(f"the runners could not be gated again: {'; '.join(x.problems)}")
+    s.notes += notes
+    return changed
+
+
+def _overhang(inst: str, st: dict) -> str:
+    return (f"{inst} hangs over the part's edge: {st['misses']} of {st['rays']} points across it have no part "
+            "under them")
+
+
 @app.post("/api/designs/{sid}/workflow/centre_part")
 def centre_part(sid: str, cavity: str | None = Body(None, embed=True)) -> dict:
     s = _session(sid)
     bb = _part_entry(s, cavity)["bbox"]
-    _workflow(s, lambda: workflow.centre_part_patch(s.doc, bb, cavity))
-    _regate(s)
+    _move(s, cavity, lambda carry: workflow.centre_part_patch(s.doc, bb, cavity, carry))
     return _state(sid)
 
 
 @app.post("/api/designs/{sid}/workflow/move_part")
 def move_part(sid: str, delta: list[float] = Body(...), cavity: str | None = Body(None)) -> dict:
     s = _session(sid)
-    bb = _part_entry(s, cavity)["bbox"]
-    _workflow(s, lambda: workflow.move_part_patch(s.doc, delta, cavity, bb))
-    _regate(s)
+    _part_entry(s, cavity)
+    _move(s, cavity, lambda carry: workflow.move_part_patch(s.doc, delta, cavity, carry))
     return _state(sid)
 
 
@@ -486,8 +700,7 @@ def turn_part(sid: str, axis: str = Body(...), angle_deg: float = Body(...), cav
     s = _session(sid)
     lo, hi = _part_entry(s, cavity)["bbox"]
     centre = [(a + b) / 2 for a, b in zip(lo, hi)]
-    _workflow(s, lambda: workflow.turn_part_patch(s.doc, axis, angle_deg, centre, cavity, [lo, hi]))
-    _regate(s)
+    _move(s, cavity, lambda carry: workflow.turn_part_patch(s.doc, axis, angle_deg, centre, cavity, carry))
     return _state(sid)
 
 
@@ -496,7 +709,7 @@ def add_copy(sid: str, of: str | None = Body(None, embed=True)) -> dict:
     """Another copy of a part, put beside everything already in the box."""
     s = _session(sid)
     lo = _part_entry(s, of)["bbox"][0]
-    _workflow(s, lambda: workflow.add_copy_patch(s.doc, of, _beside(s, lo[0])))
+    _workflow_then_follow(s, lambda: workflow.add_copy_patch(s.doc, of, _beside(s, lo[0])))
     return _state(sid)
 
 
@@ -516,14 +729,18 @@ def add_part_file(sid: str, path: str = Body(...), units: str = Body("auto")) ->
     lo, hi = _bb(src.shape)
     c = [(a + b) / 2 for a, b in zip(lo, hi)]
     dx = _beside(s, lo[0])[0]
-    _workflow(s, lambda: workflow.add_file_patch(s.doc, str(p), [dx, -c[1], -c[2]], units, p.name))
+    source = os.path.relpath(p, s.doc.base_dir.resolve())        # relative to the design, as the main part is
+    _workflow_then_follow(s, lambda: workflow.add_file_patch(s.doc, source, [dx, -c[1], -c[2]], units, p.name))
     return _state(sid)
 
 
 @app.post("/api/designs/{sid}/workflow/remove_part")
 def remove_part(sid: str, cavity: str = Body(..., embed=True)) -> dict:
+    """A part out of the box, with the feeders, vents and hand-drawn ingates on it; runners are gated again."""
     s = _session(sid)
-    _workflow(s, lambda: workflow.remove_part_patch(s.doc, cavity))
+    _part_entry(s, cavity)
+    on_it = _on_part(s, cavity)
+    _workflow_then_follow(s, lambda: workflow.remove_part_patch(s.doc, cavity, on_it))
     return _state(sid)
 
 
@@ -531,59 +748,102 @@ def remove_part(sid: str, cavity: str = Body(..., embed=True)) -> dict:
 def place_sprue(sid: str, x: float = Body(...), y: float = Body(...), d_top: float = Body(...),
                 d_bottom: float = Body(...)) -> dict:
     s = _session(sid)
-    _workflow(s, lambda: workflow.sprue_patch(s.doc, x, y, d_top, d_bottom))
+    # runners from it run in from the new place
+    _workflow_then_follow(s, lambda: workflow.sprue_patch(s.doc, x, y, d_top, d_bottom))
     return _state(sid)
 
 
 @app.post("/api/designs/{sid}/workflow/runner")
-def draw_runner(sid: str, side: str = Body(...), w_parting: float = Body(...), w_far: float = Body(...),
-                height: float = Body(...), points: list[list[float]] = Body(...),
+def draw_runner(sid: str, side: str = Body(...), height: float = Body(...), points: list[list[float]] = Body(...),
+                width: float | None = Body(None), taper_pct: float | None = Body(None),
+                w_parting: float | None = Body(None), w_far: float | None = Body(None),
+                extension: float | None = Body(None),
                 runner: str | None = Body(None), branch: dict | None = Body(None),
                 gate: dict | None = Body(None)) -> dict:
     """Redraw a runner, or (runner null) draw a new one from the sprue or (branch {from, at}) off
-    another runner; with gate {width, thickness, length, side} an ingate goes where it meets the part."""
+    another runner; with gate {width, thickness, length, side} an ingate goes where it meets the part.
+    Its section: width (the bottom face) and taper_pct (the top face that much narrower), or the two
+    widths w_parting and w_far.  extension: how far it runs past its last ingate (0: as drawn)."""
     s = _session(sid)
-    outline = _runner_outline(s, side, height, gate) if gate else None
+    if width is not None or taper_pct is not None:
+        if width is None or taper_pct is None:
+            raise HTTPException(422, "type the runner's width and its taper %")
+        try:
+            w_parting, w_far = workflow.runner_widths(side, float(width), float(taper_pct))
+        except workflow.WorkflowError as e:
+            raise HTTPException(422, str(e)) from None
+    elif w_parting is None or w_far is None:
+        raise HTTPException(422, "type the runner's width and its taper %")
+    level = workflow.level_for(s.doc.data, runner, branch, side)
+    outline = _runner_outline(s, side, height, gate, level) if gate else None
     _workflow(s, lambda: workflow.runner_patch(s.doc, side, w_parting, w_far, height, points, runner,
-                                               branch, gate, outline))
+                                               branch, gate, outline, taper_pct, extension))
     return _state(sid)
 
 
-def _runner_outline(s: Session, side: str, height: float, gate: dict | None) -> list | None:
+def _runner_outline(s: Session, side: str, height: float, gate: dict | None, level: float = 0.0) -> list | None:
     """Where a runner first touches the part: the part's outline through the runner's depth (and the
-    ingate's), not only on the parting plane: the part may reach further out below or above it."""
-    if not (s.result and s.result.part):
+    ingate's), not only at its parting-plane face: the part may reach further out below or above it.
+    level: the height of the runner's parting-plane face (0: on the parting plane)."""
+    if not (s.result and _pm(s)):
         return None
 
     def levels(sign: float, depth: float) -> set[float]:        # ~every twelfth of the depth, ends just inside
         n = 12
         return {sign * min(max(depth * k / n, 1e-3), depth - 1e-3) for k in range(n + 1)}
-    zs = levels(1.0 if side == "cope" else -1.0, float(height))
+    lv = float(level or 0.0)
+    zs = {lv + z for z in levels(1.0 if side == "cope" else -1.0, float(height))}
     t = float((gate or {}).get("thickness") or 0)
     if t > 0:
-        zs |= levels(1.0 if gate.get("side") == "cope" else -1.0, t)
-    return _outline(s) + [line for z in sorted(zs) for line in _section_at(s, z)]
+        zs |= {lv + z for z in levels(1.0 if gate.get("side") == "cope" else -1.0, t)}
+    face = _outline(s) if abs(lv) < 1e-9 else _section_at(s, lv + (1e-3 if side == "cope" else -1e-3))
+    return face + [line for z in sorted(zs) for line in _section_at(s, z)]
 
 
-def _regate(s: Session) -> None:
-    """After a part moved: the gated runners are cut and gated again against it, in the same undo step."""
-    patch = workflow.regate_patch(s.doc, lambda p: _runner_outline(
-        s, p["side"], p["height"], {"thickness": p["gate_thickness"], "side": p.get("gate_side", "drag")}))
+@app.post("/api/designs/{sid}/workflow/gate")
+def set_gate(sid: str, gate: dict | None = Body(..., embed=True)) -> dict:
+    """The ingate size {width, thickness, length, side} for every runner: each is cut and gated again
+    with it where it runs into a part, all in one undo step. gate null: no automatic ingates."""
+    s = _session(sid)
+    if gate is None:
+        _workflow(s, lambda: workflow.ungate_patch(s.doc))
+        return _state(sid)
+    try:
+        g = {k: float(gate[k]) for k in ("width", "thickness", "length")}
+        g["side"] = gate.get("side", "drag")
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(422, "the ingate needs a width, thickness and length") from None
+    if min(g["width"], g["thickness"], g["length"]) <= 0 or g["side"] not in ("drag", "cope"):
+        raise HTTPException(422, "type the ingate's width, thickness and length (side drag or cope)")
+    patch, failed = workflow.regate_patch(s.doc, lambda p: _runner_outline(
+        s, p["side"], p["height"], {"thickness": p["gate_thickness"], "side": p["gate_side"]},
+        p.get("level", 0.0)), g)
+    s.notes += failed
     if patch:
-        s.doc.apply(patch)
-        s.doc.merge_last()
-        _changed(s)
+        _apply(s, patch)
+    return _state(sid)
 
 
 def _section_at(s: Session, z: float) -> list:
     """The part cut at height z (mm, mold frame), cached per part placement."""
-    from core.mold import section_outline
-    key = (s.meshes["part"][0] if "part" in s.meshes else "", round(z, 4))
+    from core.partmesh import section
+    pm = _pm(s)
+    key = (pm.key, round(z, 4))
     if key not in s.sections:
         if len(s.sections) > 64:
             s.sections.clear()
-        s.sections[key] = section_outline(s.result.part.metal, z)
+        s.sections[key] = section(pm.metal_placed(), z)
     return s.sections[key]
+
+
+@app.post("/api/designs/{sid}/workflow/runner_level")
+def set_runner_level(sid: str, runner: str = Body(...), level: float = Body(...)) -> dict:
+    """Move a runner up or down within its half (level: the height of its parting-plane face, 0 on the
+    parting plane, negative in the drag), with its branches and ingates; the sprue follows it down and
+    the automatic ingates are cut again against the part at the new height, in one undo step."""
+    s = _session(sid)
+    _workflow_then_follow(s, lambda: workflow.runner_level_patch(s.doc, runner, level))
+    return _state(sid)
 
 
 @app.post("/api/designs/{sid}/workflow/remove_runner")
@@ -618,7 +878,7 @@ def suggest_fit(sid: str) -> dict:
     from where it is now and what it leaves (size, below/above the plane, undercut estimate)."""
     s = _session(sid)
     pm = _part(s)
-    key = s.meshes["part"][0] if "part" in s.meshes else ""
+    key = pm.key
     if s.suggestions[0] != key or not key:
         s.suggestions = (key, fit.suggest(pm.shape))
     return {"options": s.suggestions[1]}
@@ -638,8 +898,7 @@ def apply_fit(sid: str, move: list[list[float]] = Body(...), length: float = Bod
               height: float = Body(...), parting: float = Body(...), shift: list[float] = Body([0, 0, 0])) -> dict:
     s = _session(sid)
     _part(s)
-    _workflow(s, lambda: workflow.fit_patch(s.doc, move, length, width, height, parting, shift))
-    _regate(s)
+    _move(s, None, lambda carry: workflow.fit_patch(s.doc, move, length, width, height, parting, shift, carry))
     return _state(sid)
 
 
@@ -658,18 +917,17 @@ def add_matchbox(box: dict = Body(...)) -> list[dict]:
 
 # ---- on the sprue: cup, filter, well; on the part: feeders and vents ---------------------------
 
-def _part_top(s: Session, x: float, y: float) -> float:
-    """Height of the part's top at (x, y) (a ray straight down onto it)."""
-    from OCP.gp import gp_Dir, gp_Lin, gp_Pnt
-    from OCP.IntCurvesFace import IntCurvesFace_ShapeIntersector
-    pm = _part(s)
-    hit = IntCurvesFace_ShapeIntersector()
-    hit.Load(pm.metal.wrapped, 1e-6)
-    hit.Perform(gp_Lin(gp_Pnt(x, y, pm.bbox[1][2] + 10.0), gp_Dir(0, 0, -1)), 0.0, 1e9)
-    zs = [hit.Pnt(i).Z() for i in range(1, hit.NbPnt() + 1)]
-    if not zs:
+def _seat(s: Session, x: float, y: float, d: float) -> tuple[float, float]:
+    """(base height, embed) for something round of diameter d standing on the part at (x, y): its base
+    on the highest point of the part's top under it, reaching down to the lowest (plus the usual embed)."""
+    from core.partmesh import seat
+    _part(s)
+    st = seat(_pm(s).metal_placed(), x, y, d)
+    if st is None:
         raise HTTPException(422, f"there is no part at ({x:.0f}, {y:.0f}): click on the part")
-    return float(max(zs))
+    if st["misses"]:
+        s.notes.append(_overhang("it", st).replace("it hangs", "It hangs", 1))
+    return st["top"], st["drop"] + EMBED.default
 
 
 @app.post("/api/designs/{sid}/workflow/cup")
@@ -695,36 +953,28 @@ def add_feeder(sid: str, kind: str = Body(...), x: float = Body(...), y: float =
     """A top feeder where (x, y) falls on the part, or a side feeder standing at (x, y) beside it, its neck
     {width, thickness, side} running to where it first meets the part."""
     s = _session(sid)
-    z = 0.0
+    z, embed = 0.0, None
     if kind == "top":
-        z = _part_top(s, x, y)
+        z, embed = _seat(s, x, y, d)
     elif kind == "side":
         if not neck or min(float(neck.get("width") or 0), float(neck.get("thickness") or 0)) <= 0:
             raise HTTPException(422, "type the neck's width and thickness")
         side = neck.get("side", "cope")
         outline = _runner_outline(s, side, float(neck["thickness"]), None) or []
-        pts = np.array([p for line in outline for p in line], float)
-        if not len(pts):
-            raise HTTPException(422, "the part does not reach the parting plane here")
-        q = pts[np.argmin(np.hypot(pts[:, 0] - x, pts[:, 1] - y))]
-        dist = float(np.hypot(q[0] - x, q[1] - y))
-        if dist < d / 2:
-            raise HTTPException(422, "the feeder stands on the part: move it beside the part")
-        u = (q - (x, y)) / dist
-        hit = workflow._crossing([[x, y, 0.0], [x + u[0] * (dist + 50), y + u[1] * (dist + 50), 0.0]], outline,
-                                 float(neck["width"]) / 2)
-        if hit is None:
-            raise HTTPException(422, "no part beside the feeder")
-        neck = {**neck, "side": side, "end": hit[1].tolist()}
-    _workflow(s, lambda: workflow.feeder_patch(s.doc, kind, x, y, z, d, height, neck))
+        try:
+            end = workflow.neck_end(outline, x, y, d, float(neck["width"]))
+        except workflow.WorkflowError as e:
+            raise HTTPException(422, str(e)) from None
+        neck = {**neck, "side": side, "end": end}
+    _workflow(s, lambda: workflow.feeder_patch(s.doc, kind, x, y, z, d, height, neck, embed))
     return _state(sid)
 
 
 @app.post("/api/designs/{sid}/workflow/vent")
 def add_vent(sid: str, x: float = Body(...), y: float = Body(...), d: float = Body(...)) -> dict:
     s = _session(sid)
-    z = _part_top(s, x, y)
-    _workflow(s, lambda: workflow.vent_patch(s.doc, x, y, z, d))
+    z, embed = _seat(s, x, y, d)
+    _workflow(s, lambda: workflow.vent_patch(s.doc, x, y, z, d, embed))
     return _state(sid)
 
 
