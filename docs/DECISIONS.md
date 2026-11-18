@@ -255,3 +255,17 @@ Architectural choices and why, newest last.  Foundry numbers are never decided h
     with the well under it. A redrawn runner keeps its level, a branch takes its parent's, a runner
     switched to the other half goes back to the plane. Set by a typed depth / height in the runner step
     or a z-only arrow on the selected runner in 3D (`/workflow/runner_level`, one undo step).
+60. **Automated layout generator: the GatingJob** (2026-11-19, Phase 0 of the layout-generator task). A
+    job (`layouts/job.py`, schema `layouts/schema/gating_job.v1.0.json`) holds the engineer's inputs, a
+    snapshot of the recipe set it ran with, and one section per phase (modulus, ingate candidates,
+    layouts, runners, metrics; `rejected` collects layouts rejected in phases 3 and 4; `assemblies` the
+    3D models built on demand). Each phase records the hash of what it read; a changed input makes that
+    phase and every later one stale, and re-running a phase clears everything after it. Ids are given
+    in generation order and the result sections hold no times, so the same job gives the same JSON.
+    Ingates are disabled through `inputs.limits.disabled_ingates` (candidate ids are stable), which
+    leaves Phases 1-2 valid. The recipe set is still `presets/<process>_<alloy>.json`; the layout values
+    are a new `layout` block there, **blank** like the rest. Which alloys and processes the generator
+    offers is data (`layouts/settings.json`: grey and SG iron, green sand and no-bake); which recipe
+    values each phase needs is data (`layouts/recipe_keys.json`). Tolerances given in the task are in
+    `settings.json`; the module's own starting choices are listed there under `_proposed`. Tests use
+    invented, clearly marked recipes in `tests/layouts/recipes/`, never the presets.

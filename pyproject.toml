@@ -17,11 +17,12 @@ dependencies = [
 dev = ["pytest", "httpx"]
 
 [tool.setuptools.packages.find]
-include = ["core*", "elements*", "calculators*", "rules*", "bridge*", "api*", "seeds*"]
+include = ["core*", "elements*", "calculators*", "rules*", "bridge*", "api*", "seeds*", "layouts*"]
 
 [tool.setuptools.package-data]
 core = ["schema/*.json"]
 seeds = ["knobs.json"]
+layouts = ["schema/*.json", "settings.json", "recipe_keys.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

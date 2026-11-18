@@ -1,0 +1,48 @@
+{
+  "_about": "Numerical settings of the layout generator: tolerances and resolution, not foundry numbers (those are in presets/<process>_<alloy>.json under 'layout'). Values marked in _proposed are the module's starting choices, to be confirmed; the rest come from the task spec.",
+  "_proposed": [
+    "modulus.voxel_fraction_of_min_wall",
+    "modulus.voxel_min_mm",
+    "modulus.hot_spot_min_rise_voxels",
+    "symmetry.voxel_mm",
+    "ingates.parting_tolerance_mm",
+    "layouts.hausdorff_tolerance_mm",
+    "layouts.count_threshold",
+    "layouts.free_sprue_positions"
+  ],
+  "alloys": {
+    "grey_iron": {"label": "Grey cast iron (CI)"},
+    "sg_iron": {"label": "Ductile / SG iron"}
+  },
+  "processes": {
+    "green_sand": {"label": "Green sand"},
+    "no_bake": {"label": "No-bake"}
+  },
+  "modulus": {
+    "voxel_fraction_of_min_wall": 0.125,
+    "voxel_min_mm": 0.5,
+    "hot_spot_min_rise_voxels": 1.0,
+    "analytic_tolerance_pct": 3.0,
+    "convergence_tolerance_pct": 3.0
+  },
+  "symmetry": {
+    "mirror_iou_min": 0.99,
+    "voxel_mm": null
+  },
+  "ingates": {
+    "parting_tolerance_mm": 0.01
+  },
+  "layouts": {
+    "count_threshold": 5000,
+    "hausdorff_tolerance_mm": 0.01,
+    "free_sprue_positions": ["centre", "centre_line_x", "centre_line_y"]
+  },
+  "runners": {
+    "path_length_tolerance_pct": 0.5,
+    "area_ratio_tolerance_pct": 2.0,
+    "hausdorff_tolerance_mm": 0.01
+  },
+  "assembly": {
+    "volume_tolerance_pct": 0.1
+  }
+}

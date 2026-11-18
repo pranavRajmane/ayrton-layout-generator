@@ -36,5 +36,42 @@
     "max_runner_velocity_m_s": null,
     "max_joint_angle_deg": null
   },
+  "layout": {
+    "clearance": {
+      "flask_wall_mm": null,
+      "cavity_cavity_mm": null,
+      "cavity_sprue_mm": null,
+      "runner_cavity_mm": null,
+      "cope_above_mm": null,
+      "drag_below_mm": null
+    },
+    "ingate": {
+      "min_contact_length_mm": null,
+      "thickness_mm": null,
+      "aspect": null,
+      "merge_distance_mm": null,
+      "thin_wall_mm": null,
+      "impingement_distance_mm": null,
+      "rules": null
+    },
+    "runner": {
+      "side": null,
+      "height_ratio": null,
+      "taper_pct": null,
+      "extension_mm": null
+    },
+    "sprue": {
+      "basin_head_mm": null
+    },
+    "cup": {
+      "d_top_mm": null,
+      "height_mm": null
+    },
+    "well": {
+      "d_ratio": null,
+      "depth_mm": null
+    },
+    "draft_deg": null
+  },
   "source": "TODO: the reference these values come from"
 }

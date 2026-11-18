@@ -1,0 +1,43 @@
+{
+  "_about": "Recipe values (dotted paths into presets/<process>_<alloy>.json) each phase needs, and why. A job refuses to run a phase while any of its values is null. A new alloy needs only a preset file with these filled.",
+  "modulus": [],
+  "ingate_candidates": [
+    {"path": "layout.ingate.min_contact_length_mm", "why": "shortest parting-line patch an ingate may sit on"},
+    {"path": "layout.ingate.thickness_mm", "why": "ingate thickness through the parting plane"},
+    {"path": "layout.ingate.aspect", "why": "ingate width / thickness"},
+    {"path": "layout.ingate.merge_distance_mm", "why": "candidates closer than this merge into one"},
+    {"path": "layout.ingate.thin_wall_mm", "why": "a section thinner than this, straight ahead of an ingate, is flagged as impinged"},
+    {"path": "layout.ingate.impingement_distance_mm", "why": "how far ahead of an ingate a core or thin wall counts as impinged"},
+    {"path": "layout.ingate.rules", "why": "the alloy's ingate rule tags (e.g. feeds_heaviest_zone)"}
+  ],
+  "layouts": [
+    {"path": "layout.clearance.flask_wall_mm", "why": "cavity to flask wall"},
+    {"path": "layout.clearance.cavity_cavity_mm", "why": "cavity to cavity"},
+    {"path": "layout.clearance.cavity_sprue_mm", "why": "cavity to sprue"},
+    {"path": "layout.clearance.runner_cavity_mm", "why": "runner corridor to cavity"},
+    {"path": "layout.clearance.cope_above_mm", "why": "sand above the cavity in the cope"},
+    {"path": "layout.clearance.drag_below_mm", "why": "sand below the cavity in the drag"},
+    {"path": "shrinkage_pct", "why": "pattern allowance: cavity footprints are the casting scaled up by it"}
+  ],
+  "runners": [
+    {"path": "density_kg_m3", "why": "poured weight and choke area"},
+    {"path": "discharge_coefficient", "why": "choke area"},
+    {"path": "pour_time_formula", "why": "pouring time"},
+    {"path": "gating_ratios.default", "why": "sprue : runner : ingate areas"},
+    {"path": "layout.runner.side", "why": "runner in the drag or the cope"},
+    {"path": "layout.runner.height_ratio", "why": "runner height / width at the parting plane"},
+    {"path": "layout.runner.taper_pct", "why": "runner top face narrower than its bottom (draft)"},
+    {"path": "layout.runner.extension_mm", "why": "runner run-on past the last ingate"},
+    {"path": "layout.sprue.basin_head_mm", "why": "metal height in the cup above the sprue top"}
+  ],
+  "metrics": [
+    {"path": "density_kg_m3", "why": "poured weight"}
+  ],
+  "assembly": [
+    {"path": "layout.cup.d_top_mm", "why": "pouring cup top diameter"},
+    {"path": "layout.cup.height_mm", "why": "pouring cup height"},
+    {"path": "layout.well.d_ratio", "why": "sprue well diameter / sprue bottom diameter"},
+    {"path": "layout.well.depth_mm", "why": "sprue well depth below the runners"},
+    {"path": "layout.draft_deg", "why": "draft on cup, well and ingates"}
+  ]
+}

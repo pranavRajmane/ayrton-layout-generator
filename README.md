@@ -32,6 +32,7 @@ AYRTON_SOLID=~/Desktop/ayrton-solid python -m pytest -q tests/test_reference_par
 | `elements/` | element plugins only (the library); `dummy_box` proves the pipeline |
 | `calculators/` | pure hydraulics, the formula evaluator, the engine over a regenerated design, ratio propagation |
 | `rules/` | system rule plugins (`system.*`) |
+| `layouts/` | automated multi-cavity layout generator: the GatingJob spec, recipe sets, phases |
 | `presets/` | process × alloy presets (Template 4); **all values blank until filled from trusted references** |
 | `bridge/` | export to Ayrton (project folder + region STLs + manifest + named STEP) |
 | `api/` | FastAPI for the editor |

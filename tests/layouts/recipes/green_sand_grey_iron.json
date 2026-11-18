@@ -1,0 +1,79 @@
+{
+  "id": "green_sand_grey_iron",
+  "process": "green_sand",
+  "alloy": "grey_iron",
+  "density_kg_m3": 7100.0,
+  "viscosity_pa_s": 0.006,
+  "pouring_temp_c": {
+    "default": 1400,
+    "min": 1350,
+    "max": 1450
+  },
+  "shrinkage_pct": 1.0,
+  "discharge_coefficient": 0.8,
+  "pour_time_formula": "2.0 * sqrt(G)",
+  "gating_ratios": {
+    "default": [
+      1.0,
+      1.3,
+      1.1
+    ],
+    "options": {
+      "pressurized": [
+        null,
+        null,
+        null
+      ],
+      "unpressurized": [
+        null,
+        null,
+        null
+      ]
+    }
+  },
+  "limits": {
+    "max_ingate_velocity_m_s": null,
+    "max_runner_velocity_m_s": null,
+    "max_joint_angle_deg": null
+  },
+  "layout": {
+    "clearance": {
+      "flask_wall_mm": 30.0,
+      "cavity_cavity_mm": 25.0,
+      "cavity_sprue_mm": 40.0,
+      "runner_cavity_mm": 15.0,
+      "cope_above_mm": 50.0,
+      "drag_below_mm": 50.0
+    },
+    "ingate": {
+      "min_contact_length_mm": 15.0,
+      "thickness_mm": 5.0,
+      "aspect": 4.0,
+      "merge_distance_mm": 20.0,
+      "thin_wall_mm": 6.0,
+      "impingement_distance_mm": 30.0,
+      "rules": [
+        "feeds_heaviest_zone"
+      ]
+    },
+    "runner": {
+      "side": "drag",
+      "height_ratio": 1.0,
+      "taper_pct": 15.0,
+      "extension_mm": 40.0
+    },
+    "sprue": {
+      "basin_head_mm": 40.0
+    },
+    "cup": {
+      "d_top_mm": 90.0,
+      "height_mm": 60.0
+    },
+    "well": {
+      "d_ratio": 2.0,
+      "depth_mm": 20.0
+    },
+    "draft_deg": 2.0
+  },
+  "source": "TEST FIXTURE ONLY: invented numbers that exercise the code paths. Not foundry data; never copy into presets/."
+}
