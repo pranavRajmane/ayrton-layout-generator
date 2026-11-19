@@ -3,6 +3,8 @@
   "_proposed": [
     "symmetry.voxel_mm",
     "ingates.parting_tolerance_mm",
+    "ingates.outline_step_mm",
+    "runners.footprint_deflection_mm",
     "layouts.hausdorff_tolerance_mm",
     "layouts.count_threshold",
     "layouts.free_sprue_positions",
@@ -62,7 +64,9 @@
     "voxel_mm": null
   },
   "ingates": {
-    "parting_tolerance_mm": 0.01
+    "parting_tolerance_mm": 0.01,
+    "outline_step_mm": 0.5,
+    "known_rules": ["feeds_heaviest_zone", "feeds_hot_spot_zone", "no_impingement"]
   },
   "layouts": {
     "count_threshold": 5000,
@@ -74,6 +78,7 @@
     ]
   },
   "runners": {
+    "footprint_deflection_mm": 0.05,
     "path_length_tolerance_pct": 0.5,
     "area_ratio_tolerance_pct": 2.0,
     "hausdorff_tolerance_mm": 0.01

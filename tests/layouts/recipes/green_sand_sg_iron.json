@@ -46,6 +46,7 @@
       "drag_below_mm": 50.0
     },
     "ingate": {
+      "side": "drag",
       "min_contact_length_mm": 15.0,
       "thickness_mm": 5.0,
       "aspect": 4.0,

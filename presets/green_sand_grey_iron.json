@@ -46,6 +46,7 @@
       "drag_below_mm": null
     },
     "ingate": {
+      "side": null,
       "min_contact_length_mm": null,
       "thickness_mm": null,
       "aspect": null,

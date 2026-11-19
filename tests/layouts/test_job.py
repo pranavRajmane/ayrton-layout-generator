@@ -45,6 +45,7 @@ INGATES = [{"id": "g0", "part": "part", "location": [0.0, 25.0, 0.0], "contact_f
             "target_zone": "z0", "zone_modulus": 30000 / 7000, "contact_length": 50.0, "section": sec_rect(20, 5),
             "ingate_modulus": 20 * 5 / (2 * 25), "flags": {"impinges_core": False, "impinges_thin_wall": False},
             "rule_tags": ["feeds_heaviest_zone"], "merged_from": []}]
+ING = {"candidates": INGATES, "discarded": []}
 
 
 def layout(lid, n=2, key=None):
@@ -68,7 +69,7 @@ def rejection(lid, code="flask.wall"):
 
 def run_all(job: GatingJob) -> GatingJob:
     job.finish("modulus", MODULUS, runtime_s=0.1)
-    job.finish("ingate_candidates", INGATES)
+    job.finish("ingate_candidates", ING)
     job.finish("layouts", [layout("l0"), layout("l1", key="k1")], rejected=[rejection("l2")],
                counts={"enumerated": 3})
     job.finish("runners", [runner("l0")], rejected=[rejection("l1", "runner.crosses_cavity")])
@@ -187,12 +188,12 @@ def test_full_run_counts_add_up():
 def test_phases_run_in_order():
     job = make()
     with pytest.raises(JobError, match="needs modulus"):
-        job.finish("ingate_candidates", INGATES)
+        job.finish("ingate_candidates", ING)
     job.finish("modulus", MODULUS)
     with pytest.raises(JobError, match="needs ingate_candidates"):
         job.finish("layouts", [])
     with pytest.raises(JobError, match="does not reject"):
-        job.finish("ingate_candidates", INGATES, rejected=[rejection("x")])
+        job.finish("ingate_candidates", ING, rejected=[rejection("x")])
 
 
 def test_no_phase_without_a_recipe():
@@ -202,8 +203,8 @@ def test_no_phase_without_a_recipe():
 
 
 @pytest.mark.parametrize("phase, bad, msg", [
-    ("ingate_candidates", [dict(INGATES[0], target_zone="z9")], "targets no zone"),
-    ("ingate_candidates", [dict(INGATES[0], normal=[1.0, 1.0])], "not a unit vector"),
+    ("ingate_candidates", {"candidates": [dict(INGATES[0], target_zone="z9")], "discarded": []}, "targets no zone"),
+    ("ingate_candidates", {"candidates": [dict(INGATES[0], normal=[1.0, 1.0])], "discarded": []}, "not a unit vector"),
     ("layouts", [dict(layout("l0"), ingate="g9")], "no ingate candidate"),
     ("layouts", [layout("l0", key="same"), layout("l1", key="same")], "duplicate layout"),
     ("layouts", [dict(layout("l0"), n=3)], "expected 0..2"),
@@ -212,7 +213,7 @@ def test_cross_references_are_checked(phase, bad, msg):
     job = make()
     job.finish("modulus", MODULUS)
     if phase == "layouts":
-        job.finish("ingate_candidates", INGATES)
+        job.finish("ingate_candidates", ING)
     with pytest.raises(JobError, match=msg):
         job.finish(phase, bad)
 
@@ -220,7 +221,7 @@ def test_cross_references_are_checked(phase, bad, msg):
 def test_every_layout_is_routed_or_rejected():
     job = make()
     job.finish("modulus", MODULUS)
-    job.finish("ingate_candidates", INGATES)
+    job.finish("ingate_candidates", ING)
     job.finish("layouts", [layout("l0"), layout("l1", key="k1")])
     with pytest.raises(JobError, match="neither routed nor rejected"):
         job.finish("runners", [runner("l0")])
@@ -290,3 +291,22 @@ def test_canonical_json_ignores_key_order_and_refuses_nan():
     assert canonical_json({"b": 1, "a": [1.5, {"d": 0, "c": 2}]}) == canonical_json({"a": [1.5, {"c": 2, "d": 0}], "b": 1})
     with pytest.raises(ValueError):
         canonical_json({"x": float("nan")})
+
+
+def test_a_1_0_job_loads_as_1_1(tmp_path):
+    d = new("old", PART, "green_sand", "grey_iron", FLASK)
+    d["schema_version"] = "1.0"
+    f = tmp_path / "old.job.json"
+    f.write_text(json.dumps(d))
+    assert GatingJob.load(f).data["schema_version"] == "1.1"
+
+
+def test_discarded_ids_are_unique_and_apart_from_candidates():
+    bad = {"id": "g0", "part": "part", "location": [0.0, 0.0, 0.0], "contact_face": 1, "contact_length": 3.0,
+           "reasons": ["short_contact"]}
+    job = make()
+    job.finish("modulus", MODULUS)
+    with pytest.raises(JobError, match="both a candidate and discarded"):
+        job.finish("ingate_candidates", {"candidates": INGATES, "discarded": [bad]})
+    with pytest.raises(JobError, match="discarded id 'd0' is used twice"):
+        job.finish("ingate_candidates", {"candidates": INGATES, "discarded": [dict(bad, id="d0")] * 2})

@@ -1,0 +1,480 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ayrton.noetherlabs.com/schema/gating_job.v1.1.json",
+  "title": "Ayrton automated gating layout job",
+  "description": "One job of the layout generator. Phases read the sections before them and write their own; any phase can be re-run from a saved job. Units mm, kg, s; the mold frame has the parting plane at z = 0 with the cope on +z.",
+  "type": "object",
+  "required": ["schema_version", "id", "units", "inputs", "recipe", "phases", "modulus", "ingate_candidates",
+               "layouts", "runners", "rejected", "metrics", "assemblies"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "1.1"},
+    "id": {"$ref": "#/$defs/id"},
+    "units": {
+      "type": "object",
+      "required": ["length", "mass", "time"],
+      "additionalProperties": false,
+      "properties": {"length": {"const": "mm"}, "mass": {"const": "kg"}, "time": {"const": "s"}}
+    },
+
+    "inputs": {
+      "type": "object",
+      "required": ["part", "process", "alloy", "flask", "parting", "sprue", "overrides", "face_tags", "limits", "seed"],
+      "additionalProperties": false,
+      "properties": {
+        "part": {
+          "type": "object",
+          "required": ["source", "units", "sha256"],
+          "additionalProperties": false,
+          "properties": {
+            "source": {"type": "string", "minLength": 1, "description": "part file, relative to the job folder or absolute"},
+            "units": {"enum": ["auto", "mm", "cm", "m", "in"]},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "of the file when the job was made; a changed file makes every phase stale"}
+          }
+        },
+        "process": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "with alloy, picks the recipe set presets/<process>_<alloy>.json"},
+        "alloy": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "which alloys are offered is data (layouts/settings.json), not schema"},
+        "flask": {
+          "type": "object",
+          "required": ["length", "width", "cope_height", "drag_height"],
+          "additionalProperties": false,
+          "properties": {
+            "length": {"$ref": "#/$defs/pos", "description": "inside, along x"},
+            "width": {"$ref": "#/$defs/pos", "description": "inside, along y"},
+            "cope_height": {"$ref": "#/$defs/pos", "description": "z from 0 up"},
+            "drag_height": {"$ref": "#/$defs/pos", "description": "z from 0 down"}
+          }
+        },
+        "parting": {
+          "type": "object",
+          "required": ["part_transform", "source"],
+          "additionalProperties": false,
+          "description": "the part placed in the mold frame: its parting section on z = 0, centred on the flask origin in x and y",
+          "properties": {
+            "part_transform": {"$ref": "#/$defs/transform"},
+            "source": {"enum": ["auto", "user"]}
+          }
+        },
+        "sprue": {
+          "type": "object",
+          "required": ["mode", "position"],
+          "additionalProperties": false,
+          "properties": {
+            "mode": {"enum": ["free", "fixed"]},
+            "position": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/vec2"}], "description": "x, y on the parting plane; required when fixed"}
+          }
+        },
+        "overrides": {
+          "type": "object",
+          "description": "recipe values the engineer changed for this job, by dotted path (e.g. \"layout.clearance.flask_wall_mm\")",
+          "propertyNames": {"pattern": "^[a-z_][a-z0-9_]*(\\.[a-z_][a-z0-9_]*)*$"},
+          "additionalProperties": {"type": ["number", "string", "boolean", "array", "null"]}
+        },
+        "face_tags": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["face", "tag"],
+            "additionalProperties": false,
+            "properties": {
+              "face": {"type": "integer", "minimum": 0, "description": "index into the part file's faces, as the design document's machining groups"},
+              "tag": {"enum": ["machined", "functional", "cosmetic"]}
+            }
+          }
+        },
+        "limits": {
+          "type": "object",
+          "required": ["n_min", "n_max", "families", "rotations_deg", "disabled_ingates", "riser_keepouts", "count_threshold"],
+          "additionalProperties": false,
+          "properties": {
+            "n_min": {"type": ["integer", "null"], "minimum": 1},
+            "n_max": {"type": ["integer", "null"], "minimum": 1},
+            "families": {"oneOf": [{"type": "null"}, {"type": "array", "items": {"$ref": "#/$defs/family"}, "uniqueItems": true}]},
+            "rotations_deg": {"oneOf": [{"type": "null"}, {"type": "array", "items": {"enum": [0, 90, 180, 270]}, "uniqueItems": true}]},
+            "templates": {"oneOf": [{"type": "null"}, {"type": "array", "items": {"$ref": "#/$defs/template"}, "uniqueItems": true}]},
+            "ingates": {"oneOf": [{"type": "null"}, {"type": "array", "items": {"$ref": "#/$defs/id"}, "uniqueItems": true}], "description": "only these candidates (null: all enabled)"},
+            "disabled_ingates": {"type": "array", "items": {"$ref": "#/$defs/id"}, "uniqueItems": true},
+            "riser_keepouts": {"type": "boolean"},
+            "count_threshold": {"type": ["integer", "null"], "minimum": 1, "description": "null: layouts/settings.json"}
+          }
+        },
+        "seed": {"type": "integer", "minimum": 0}
+      }
+    },
+
+    "recipe": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["id", "source_sha256", "values", "settings"],
+          "additionalProperties": false,
+          "description": "snapshot of the recipe set and numerical settings the phases ran with, overrides applied",
+          "properties": {
+            "id": {"type": "string"},
+            "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "values": {"type": "object"},
+            "settings": {"type": "object"}
+          }
+        }
+      ]
+    },
+
+    "phases": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "modulus": {"$ref": "#/$defs/phase"},
+        "ingate_candidates": {"$ref": "#/$defs/phase"},
+        "layouts": {"$ref": "#/$defs/phase"},
+        "runners": {"$ref": "#/$defs/phase"},
+        "metrics": {"$ref": "#/$defs/phase"}
+      }
+    },
+
+    "modulus": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["voxel_size", "grid", "zones", "hot_spots", "adjacency"],
+          "additionalProperties": false,
+          "properties": {
+            "voxel_size": {"$ref": "#/$defs/pos"},
+            "min_wall": {"type": ["number", "null"], "description": "the thinnest section found (twice the smallest local maximum of the distance field)"},
+            "grid": {
+              "type": "object",
+              "required": ["origin", "shape"],
+              "additionalProperties": false,
+              "properties": {
+                "origin": {"$ref": "#/$defs/vec3"},
+                "shape": {"type": "array", "items": {"type": "integer", "minimum": 1}, "minItems": 3, "maxItems": 3}
+              }
+            },
+            "field": {"type": ["string", "null"], "description": "npz beside the job: distance (mm) and zone label per voxel, for the heatmap"},
+            "volume": {"$ref": "#/$defs/nonneg"},
+            "zones": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["id", "volume", "cooling_area", "modulus", "centroid"],
+                "additionalProperties": false,
+                "properties": {
+                  "id": {"$ref": "#/$defs/id"},
+                  "volume": {"$ref": "#/$defs/pos", "description": "mm3"},
+                  "cooling_area": {"$ref": "#/$defs/nonneg", "description": "mm2, faces shared with other zones left out"},
+                  "modulus": {"$ref": "#/$defs/nonneg", "description": "mm, volume / cooling area"},
+                  "centroid": {"$ref": "#/$defs/vec3"},
+                  "max_distance": {"$ref": "#/$defs/nonneg", "description": "largest inscribed-sphere radius in the zone (mm)"}
+                }
+              }
+            },
+            "hot_spots": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["id", "position", "radius", "local_modulus", "zone"],
+                "additionalProperties": false,
+                "properties": {
+                  "id": {"$ref": "#/$defs/id"},
+                  "position": {"$ref": "#/$defs/vec3"},
+                  "radius": {"$ref": "#/$defs/pos", "description": "inscribed-sphere radius r at the maximum (mm)"},
+                  "local_modulus": {"$ref": "#/$defs/pos", "description": "r / 3 (mm)"},
+                  "zone": {"$ref": "#/$defs/id"}
+                }
+              }
+            },
+            "adjacency": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["a", "b", "interface_area"],
+                "additionalProperties": false,
+                "properties": {
+                  "a": {"$ref": "#/$defs/id"},
+                  "b": {"$ref": "#/$defs/id"},
+                  "interface_area": {"$ref": "#/$defs/pos"}
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+
+    "ingate_candidates": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["candidates", "discarded"],
+          "additionalProperties": false,
+          "properties": {
+            "candidates": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["id", "part", "location", "contact_face", "normal", "target_zone", "zone_modulus",
+                             "contact_length", "section", "ingate_modulus", "flags", "rule_tags", "merged_from"],
+                "additionalProperties": false,
+                "properties": {
+                  "id": {"$ref": "#/$defs/id"},
+                  "part": {"$ref": "#/$defs/id"},
+                  "location": {"$ref": "#/$defs/vec3", "description": "contact centre on the parting line, part frame after parting (z = 0)"},
+                  "contact_face": {"type": ["integer", "null"], "minimum": 0},
+                  "normal": {"$ref": "#/$defs/vec2", "description": "outward unit normal in the parting plane"},
+                  "target_zone": {"$ref": "#/$defs/id"},
+                  "zone_modulus": {"$ref": "#/$defs/pos"},
+                  "contact_length": {"$ref": "#/$defs/pos"},
+                  "section": {"$ref": "#/$defs/section"},
+                  "ingate_modulus": {"$ref": "#/$defs/pos"},
+                  "flags": {
+                    "type": "object",
+                    "required": ["impinges_core", "impinges_thin_wall"],
+                    "additionalProperties": false,
+                    "properties": {"impinges_core": {"type": "boolean"}, "impinges_thin_wall": {"type": "boolean"}}
+                  },
+                  "rule_tags": {"type": "array", "items": {"type": "string"}},
+                  "merged_from": {"type": "array", "items": {"type": "string"}}
+                }
+              }
+            },
+            "discarded": {
+              "type": "array",
+              "description": "stretches of the parting line, or stations on them, that give no candidate, and why",
+              "items": {
+                "type": "object",
+                "required": ["id", "part", "location", "contact_face", "contact_length", "reasons"],
+                "additionalProperties": false,
+                "properties": {
+                  "id": {"$ref": "#/$defs/id"},
+                  "part": {"$ref": "#/$defs/id"},
+                  "location": {"$ref": "#/$defs/vec3"},
+                  "contact_face": {"type": ["integer", "null"], "minimum": 0},
+                  "contact_length": {"$ref": "#/$defs/nonneg"},
+                  "reasons": {"type": "array", "minItems": 1, "uniqueItems": true,
+                              "items": {"enum": ["tagged_face", "short_contact", "blocked", "ingate_not_thinner", "no_zone"]}},
+                  "detail": {"type": "string"}
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+
+    "layouts": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "array", "items": {"$ref": "#/$defs/layout"}}
+      ]
+    },
+
+    "runners": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["layout", "template", "segments", "junctions", "sizing", "validation"],
+            "additionalProperties": false,
+            "properties": {
+              "layout": {"$ref": "#/$defs/id"},
+              "template": {"$ref": "#/$defs/template"},
+              "segments": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["id", "role", "kind", "points", "section"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {"$ref": "#/$defs/id"},
+                    "role": {"enum": ["sprue", "runner", "ingate"]},
+                    "kind": {"enum": ["polyline", "arc"]},
+                    "points": {"type": "array", "items": {"$ref": "#/$defs/vec3"}, "minItems": 2},
+                    "section": {"$ref": "#/$defs/section"},
+                    "cavity": {"type": ["integer", "null"], "minimum": 0}
+                  }
+                }
+              },
+              "junctions": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["id", "kind", "position", "in", "out"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {"$ref": "#/$defs/id"},
+                    "kind": {"enum": ["T", "Y"]},
+                    "position": {"$ref": "#/$defs/vec3"},
+                    "in": {"$ref": "#/$defs/id"},
+                    "out": {"type": "array", "items": {"$ref": "#/$defs/id"}, "minItems": 2}
+                  }
+                }
+              },
+              "sizing": {"type": "object", "description": "pour time, choke area, effective head, areas, with what each came from"},
+              "validation": {"type": "array", "items": {"$ref": "#/$defs/check"}}
+            }
+          }
+        }
+      ]
+    },
+
+    "rejected": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "phase", "params", "reasons"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {"$ref": "#/$defs/id"},
+          "phase": {"enum": ["layouts", "runners"]},
+          "params": {"type": "object", "description": "the layout's parameters (as a layout, geometry optional)"},
+          "reasons": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["code", "message"],
+              "additionalProperties": false,
+              "properties": {
+                "code": {"type": "string", "pattern": "^[a-z][a-z0-9_.]*$"},
+                "message": {"type": "string"},
+                "value": {},
+                "limit": {}
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "metrics": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["layout", "poured_weight", "yield_pct", "runner_length", "min_clearance", "path_length_error_pct"],
+            "additionalProperties": false,
+            "description": "informational only: never a score",
+            "properties": {
+              "layout": {"$ref": "#/$defs/id"},
+              "poured_weight": {"type": ["number", "null"], "description": "kg"},
+              "yield_pct": {"type": ["number", "null"]},
+              "runner_length": {"$ref": "#/$defs/nonneg"},
+              "min_clearance": {"type": "number"},
+              "path_length_error_pct": {"$ref": "#/$defs/nonneg"}
+            }
+          }
+        }
+      ]
+    },
+
+    "assemblies": {
+      "type": "object",
+      "description": "3D models built on demand (Phase 5), by layout id",
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_]*$"},
+      "additionalProperties": {
+        "type": "object",
+        "required": ["step", "input_hash", "validation"],
+        "additionalProperties": false,
+        "properties": {
+          "step": {"type": "string"},
+          "design": {"type": ["string", "null"], "description": "the CAD-module design document written for it"},
+          "input_hash": {"type": "string"},
+          "validation": {"type": "array", "items": {"$ref": "#/$defs/check"}}
+        }
+      }
+    }
+  },
+
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+    "pos": {"type": "number", "exclusiveMinimum": 0},
+    "nonneg": {"type": "number", "minimum": 0},
+    "vec2": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+    "vec3": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+    "transform": {
+      "type": "object",
+      "required": ["rotation", "translation"],
+      "additionalProperties": false,
+      "properties": {
+        "rotation": {"type": "array", "minItems": 3, "maxItems": 3,
+                     "items": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3}},
+        "translation": {"$ref": "#/$defs/vec3"}
+      }
+    },
+    "family": {"enum": ["row", "grid", "radial"]},
+    "template": {"enum": ["straight", "h", "tree", "radial"]},
+    "symmetry": {"enum": ["c1", "c2", "c4", "d1", "d2", "d4"], "description": "cN: N-fold rotation about the sprue; dN: with mirror planes too (only for a mirror-symmetric part)"},
+    "section": {
+      "type": "object",
+      "required": ["shape", "dims", "area"],
+      "additionalProperties": false,
+      "properties": {
+        "shape": {"enum": ["round", "rectangle", "trapezoid"]},
+        "dims": {"type": "object", "additionalProperties": {"$ref": "#/$defs/pos"}},
+        "area": {"$ref": "#/$defs/pos"}
+      }
+    },
+    "cavity": {
+      "type": "object",
+      "required": ["index", "rotation_deg", "mirrored", "translation", "orbit"],
+      "additionalProperties": false,
+      "description": "placed part = translate(rotate_z(mirror?(parted part))); rotation about the part's own origin",
+      "properties": {
+        "index": {"type": "integer", "minimum": 0},
+        "rotation_deg": {"type": "number", "minimum": 0, "exclusiveMaximum": 360},
+        "mirrored": {"type": "boolean", "description": "mirrored in the part's own x = 0 plane; only for a mirror-symmetric part"},
+        "translation": {"$ref": "#/$defs/vec2"},
+        "orbit": {"type": "integer", "minimum": 0, "description": "symmetry orbit; cavities in one orbit share ingate and orientation to the sprue"}
+      }
+    },
+    "layout": {
+      "type": "object",
+      "required": ["id", "n", "family", "arrangement", "symmetry", "rotation_deg", "ingate", "sprue", "template", "cavities", "key"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "n": {"type": "integer", "minimum": 1},
+        "family": {"$ref": "#/$defs/family"},
+        "arrangement": {"type": "object", "description": "the family's own parameters, e.g. rows, cols, pitch"},
+        "symmetry": {"$ref": "#/$defs/symmetry"},
+        "rotation_deg": {"enum": [0, 90, 180, 270], "description": "of the orbit representative"},
+        "ingate": {"$ref": "#/$defs/id"},
+        "sprue": {"$ref": "#/$defs/vec2"},
+        "template": {"$ref": "#/$defs/template"},
+        "cavities": {"type": "array", "items": {"$ref": "#/$defs/cavity"}, "minItems": 1},
+        "key": {"type": "string", "description": "canonical key after the flask's own symmetries: equal keys are the same layout"}
+      }
+    },
+    "check": {
+      "type": "object",
+      "required": ["code", "passed"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "passed": {"type": "boolean"},
+        "value": {},
+        "limit": {},
+        "message": {"type": "string"}
+      }
+    },
+    "phase": {
+      "type": "object",
+      "required": ["state", "input_hash"],
+      "additionalProperties": false,
+      "properties": {
+        "state": {"enum": ["pending", "running", "done", "failed"]},
+        "input_hash": {"type": ["string", "null"], "description": "hash of everything the phase read; a different hash now means stale"},
+        "runtime_s": {"type": ["number", "null"], "minimum": 0},
+        "counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "error": {"type": ["string", "null"]},
+        "issues": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}

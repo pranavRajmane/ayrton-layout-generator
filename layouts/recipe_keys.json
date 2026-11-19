@@ -2,13 +2,15 @@
   "_about": "Recipe values (dotted paths into presets/<process>_<alloy>.json) each phase needs, and why. A job refuses to run a phase while any of its values is null. A new alloy needs only a preset file with these filled.",
   "modulus": [],
   "ingate_candidates": [
+    {"path": "layout.ingate.side", "why": "ingate in the drag (below the parting plane) or the cope (above)"},
     {"path": "layout.ingate.min_contact_length_mm", "why": "shortest parting-line patch an ingate may sit on"},
     {"path": "layout.ingate.thickness_mm", "why": "ingate thickness through the parting plane"},
     {"path": "layout.ingate.aspect", "why": "ingate width / thickness"},
     {"path": "layout.ingate.merge_distance_mm", "why": "candidates closer than this merge into one"},
     {"path": "layout.ingate.thin_wall_mm", "why": "a section thinner than this, straight ahead of an ingate, is flagged as impinged"},
     {"path": "layout.ingate.impingement_distance_mm", "why": "how far ahead of an ingate a core or thin wall counts as impinged"},
-    {"path": "layout.ingate.rules", "why": "the alloy's ingate rule tags (e.g. feeds_heaviest_zone)"}
+    {"path": "layout.ingate.rules", "why": "the alloy's ingate rule tags (e.g. feeds_heaviest_zone)"},
+    {"path": "layout.clearance.runner_cavity_mm", "why": "an ingate must run at least this far out from the part clear of it, to reach a runner"}
   ],
   "layouts": [
     {"path": "layout.clearance.flask_wall_mm", "why": "cavity to flask wall"},
@@ -28,7 +30,13 @@
     {"path": "layout.runner.height_ratio", "why": "runner height / width at the parting plane"},
     {"path": "layout.runner.taper_pct", "why": "runner top face narrower than its bottom (draft)"},
     {"path": "layout.runner.extension_mm", "why": "runner run-on past the last ingate"},
-    {"path": "layout.sprue.basin_head_mm", "why": "metal height in the cup above the sprue top"}
+    {"path": "layout.sprue.basin_head_mm", "why": "metal height in the cup above the sprue top"},
+    {"path": "layout.ingate.side", "why": "gate level for the head"},
+    {"path": "layout.ingate.thickness_mm", "why": "ingate thickness; its width comes from the area"},
+    {"path": "layout.clearance.runner_cavity_mm", "why": "runner edge to cavity"},
+    {"path": "layout.clearance.cavity_sprue_mm", "why": "sprue to cavity"},
+    {"path": "layout.clearance.flask_wall_mm", "why": "runners inside the flask"},
+    {"path": "shrinkage_pct", "why": "cavities are the casting scaled up by it"}
   ],
   "metrics": [
     {"path": "density_kg_m3", "why": "poured weight"}

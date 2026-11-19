@@ -320,3 +320,68 @@ Architectural choices and why, newest last.  Foundry numbers are never decided h
     - The zone loops work on flat indices of the undecided voxels only (identical output, 4-10x faster).
     Every numerical knob is in `layouts/settings.json` under `modulus`, listed as proposed.
     Convergence tests are marked `slow` (`pytest -m slow`).
+62. **Layout generator Phase 2: ingate candidates** (2026-11-19, `layouts/ingates.py`, job schema 1.1).
+    An ingate is the CAD module's flat bar on the parting plane, in the drag (z -t..0) or the cope, run
+    straight out from the part. Candidates are stations on the part's *outer* outline just off the
+    parting plane on that side (an OCCT section, each segment knowing its B-rep face); holes in the cut
+    are cores and give none. The outline is split into one patch per face; a tagged face or a patch
+    shorter than the recipe's minimum contact is discarded whole. Stations sit along each patch with
+    the whole ingate on it, `merge_distance` apart; then a station within `merge_distance` of one on a
+    longer contact joins it (`merged_from`). A station is discarded, with its reason, when:
+    - **blocked**: along any of five lines across the ingate, out to the recipe's runner clearance and
+      at the top, middle and bottom of the band, metal comes back after sand (another part of the
+      casting is in the way). Metal right at the contact is not a block: the ingate overlaps the part
+      there, as the production ingates on 15145827 do (two of them end 10-12 mm inside its outline);
+      the first rule, any metal in the stub's path, missed those two.
+    - **ingate_not_thinner**: the bar modulus of the recipe's section (width x thickness /
+      2 (width + thickness)) is not below the modulus of the zone behind the contact (the majority zone
+      of the voxels just inside, across the width and the band).
+    - **no_zone**: no zoned voxel behind it.
+    Flags, by marching inward at mid band: **impinges_core** when any of the five lines leaves the metal
+    into a hole of the cut within the recipe's impingement distance; **impinges_thin_wall** when the
+    local thickness along the middle half of the stream drops below the recipe's thin wall (the edge
+    lines run beside the part's own corners, where the thickness field is small and means nothing).
+    Rule tags are evaluated from a fixed list (`feeds_heaviest_zone`, `feeds_hot_spot_zone`,
+    `no_impingement`, in `settings.json` `ingates.known_rules`); the recipe picks which apply. New
+    recipe key `layout.ingate.side` (blank in the presets); the phase also reads
+    `layout.clearance.runner_cavity_mm`. Schema 1.1: the section is `{candidates, discarded}`, so the
+    analysis panel can show why a stretch of parting line has no candidate; 1.0 jobs load as 1.1.
+    Validation: synthetic parts (on the line, outward, merged, tagged, short, too heavy, core and thin
+    flags, cope side, every stub fused into one valid solid, deterministic) and, marked slow, the six
+    production drag ingates of 15145827: each has a candidate within 2-9 mm facing the same way.
+63. **Layout generator Phase 4: sizing and symmetric runners** (2026-11-19, `layouts/sizing.py`,
+    `layouts/runners.py`, `layouts/footprint.py`). Built before Phase 3 at the engineer's request, on
+    hand-built layouts; Phase 3 will produce layouts that fit these templates.
+    - **Sizing** keeps its whole trail (inputs, each step, the iterations) in the runner record for a
+      hand check. Pour time from the recipe's formula in W (castings), G (poured), t; t = the
+      diameter of the largest inscribed sphere (the engineer's choice). H = cope height + basin head -
+      gate level (the ingate's mid height); H_eff = H - P^2 / 2C (parting-line gating); choke =
+      G / (rho t C_d sqrt(2 g H_eff)); sprue : runner : ingate from the recipe's ratio, its smallest
+      member the choke (`calculators.hydraulics`, unchanged). The engineer checked the numbers for a
+      straight, an H and a radial layout by hand (2026-11-19) and they agree. G = castings (as cast, no allowance) +
+      sprue + runners + ingates, iterated to a fixed point with the routing (cup and well come with
+      the 3D build and are left out). The runner area is the total at every level (the engineer's
+      choice): 2 arms A_r/2, 4 branches A_r/4; no step-down along an arm. One ingate per cavity,
+      A_i/N, recipe thickness, width = area / thickness. Runner trapezoid: height = ratio x bottom,
+      top = (1 - taper) x bottom (`core.workflow.runner_widths`). Sprue round: bottom = A_s, top by
+      continuity over the basin head (`sprue_top_area`).
+    - **Routing**: the runner meets each ingate at its foot, clearance + half the runner's width out
+      from the contact along the ingate's normal (straight: wherever the ingate reaches the runner
+      line, at least that far). straight = one line through the sprue square to every ingate, run on
+      by the extension; radial = an arm from the sprue to each foot, the ingate continuing it; h / tree
+      = balanced binary splits, each into two halves that are each other's half-turn about the
+      junction (the sprue first), arms to the halves' centres; a leaf arm's ingate continues it or
+      leaves its side (then it runs on by the extension); any other angle is rejected. Routing only
+      the representative and replicating by the half-turns gives equal paths by construction.
+    - **Checks** (each a `check` record; any failure rejects the layout with its reasons): path
+      lengths within 0.5 %; runner bands clear of every cavity's metal in the runner's half (drag
+      or cope slab footprint) by the clearance; no runner crossing another except at its own
+      junctions; ingates clear of other cavities; sprue (top diameter) clear of cavities by the sprue
+      clearance; everything inside the flask less the wall clearance; Hausdorff of the system onto its
+      own symmetry images within 0.01 mm; areas on the ratio within 2 %; the resized ingate's bar
+      modulus still below its zone's. Unroutable shapes (not square, not balanced, an H not of 4, a
+      tree not of 2^k, a radial ingate not facing the sprue, a contact too close to the runner line)
+      reject with a code before the checks.
+    - **Footprints**: projected mesh triangles unioned with shapely (new dependency, conda-forge
+      2.2), grown by the mesh deflection (0.05 mm) so a chord never undercuts the outline; a slab
+      footprint is the part cut between two heights first.

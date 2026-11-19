@@ -24,7 +24,7 @@ from pathlib import Path
 
 import jsonschema
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"   # 1.1: ingate_candidates = {candidates, discarded}
 SCHEMA_DIR = Path(__file__).parent / "schema"
 UNITS = {"length": "mm", "mass": "kg", "time": "s"}
 
@@ -162,10 +162,15 @@ def problems(data: dict) -> list[str]:
         out += [f"modulus: adjacency {p} is listed twice" for p in _dupes(f"{e['a']}-{e['b']}" for e in m["adjacency"])]
 
     cands: set[str] = set()
-    if (c := data["ingate_candidates"]) is not None:
+    if (sec := data["ingate_candidates"]) is not None:
         if data["modulus"] is None:
             out.append("ingate_candidates: present without modulus")
+        c = sec["candidates"]
         cl = [g["id"] for g in c]
+        out += [f"ingate_candidates: discarded id '{i}' is used twice"
+                for i in _dupes(d["id"] for d in sec["discarded"])]
+        out += [f"ingate_candidates: '{i}' is both a candidate and discarded"
+                for i in sorted(set(cl) & {d["id"] for d in sec["discarded"]})]
         cands = set(cl)
         out += [f"ingate_candidates: id '{i}' is used twice" for i in _dupes(cl)]
         out += [f"ingate_candidates: {g['id']} targets no zone '{g['target_zone']}'" for g in c
@@ -221,6 +226,18 @@ def problems(data: dict) -> list[str]:
     return out
 
 
+def upgrade(data: dict) -> dict:
+    """An older saved job in the current schema.  1.0 -> 1.1: the ingate section became
+    {candidates, discarded} (a 1.0 job never had one: Phase 2 came with 1.1)."""
+    if data.get("schema_version") == "1.0":
+        data = copy.deepcopy(data)
+        c = data.get("ingate_candidates")
+        if isinstance(c, list):
+            data["ingate_candidates"] = {"candidates": c, "discarded": []}
+        data["schema_version"] = "1.1"
+    return data
+
+
 def check(data: dict) -> None:
     p = problems(data)
     if p:
@@ -252,7 +269,7 @@ class GatingJob:
     @classmethod
     def load(cls, path: str | Path) -> "GatingJob":
         path = Path(path)
-        return cls(json.loads(path.read_text()), path)
+        return cls(upgrade(json.loads(path.read_text())), path)
 
     def to_json(self) -> str:
         return json.dumps(self._data, indent=1, allow_nan=False)

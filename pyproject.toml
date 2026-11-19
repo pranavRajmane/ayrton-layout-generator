@@ -9,6 +9,7 @@ dependencies = [
     "scipy",
     "jsonschema",
     "jsonpatch",
+    "shapely>=2",
     "fastapi",
     "uvicorn[standard]",
 ]
