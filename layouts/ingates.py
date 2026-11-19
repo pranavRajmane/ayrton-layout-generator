@@ -43,7 +43,7 @@ PART = "part"
 class Loop:
     pts: np.ndarray          # (n, 2), closed implicitly (segment i runs from pts[i] to pts[i + 1 mod n])
     face: np.ndarray         # (n,) face index of each segment (-1: unknown)
-    depth: int               # loops it lies inside; odd = a hole (core)
+    depth: int               # 0: bounds metal from outside (counter-clockwise); 1: a hole (core)
 
     @property
     def seg(self) -> tuple[np.ndarray, np.ndarray]:
@@ -98,7 +98,7 @@ def crossings(p, d, loops: list[Loop], max_t: float) -> list[tuple[float, int]]:
     return sorted(out)
 
 
-def cut(shape, z: float, step: float) -> list[Loop]:
+def cut(shape, z: float, step: float, join_tol: float = 0.05) -> list[Loop]:
     """The part cut by the plane at height z, as loops with the metal on their left (outer loops
     counter-clockwise, holes clockwise), in a fixed order."""
     from build123d import Face
@@ -132,14 +132,22 @@ def cut(shape, z: float, step: float) -> list[Loop]:
         if fi < 0:
             fi = _nearest_face(faces, c.Value(0.5 * (us[0] + us[-1])))
         pieces.append((pts, fi))
-    loops = _chain(pieces)
-    for k, lp in enumerate(loops):
-        lp.depth = int(sum(inside(lp.pts[:1] + 0.0, [o]).item() for j, o in enumerate(loops) if j != k))
+    loops = _chain(pieces, join_tol)
+    # metal on the left of every loop: probe just beside the middle of its longest segment with the
+    # even-odd rule over all the loops (a probe on the loop itself is ambiguous where loops touch).
+    # Then counter-clockwise loops bound metal from outside (outer), clockwise ones are holes.
     for lp in loops:
-        a = _signed_area(lp.pts)
-        if (a < 0) == (lp.depth % 2 == 0):              # outer: CCW; hole: CW
+        a, b = lp.seg
+        e = b - a
+        L = np.linalg.norm(e, axis=1)
+        i = int(np.argmax(L))
+        m = (a[i] + b[i]) / 2
+        left = np.array([-e[i, 1], e[i, 0]]) / L[i]
+        d = min(1e-3, L[i] / 10)
+        if not inside((m + d * left)[None], loops)[0]:
             lp.pts = lp.pts[::-1].copy()
             lp.face = np.roll(lp.face[::-1], -1)
+        lp.depth = 0 if _signed_area(lp.pts) > 0 else 1
     for lp in loops:                                    # start each loop at its lowest (x, y) point
         i = int(np.lexsort((lp.pts[:, 1].round(6), lp.pts[:, 0].round(6)))[0])
         lp.pts = np.roll(lp.pts, -i, axis=0)
@@ -310,17 +318,21 @@ def find(shape, modulus: dict, field: dict, values: dict, st: dict, face_tags=()
     if unknown:
         raise ValueError(f"the recipe names ingate rule(s) {unknown}; known: {sorted(RULES)}")
     step = float(st["outline_step_mm"])
+    jt = float(st.get("join_tolerance_mm", 0.05))
     eps = float(st["parting_tolerance_mm"])
     h = float(field["h"])
     tagged = {int(x["face"]) for x in face_tags}
     issues: list[str] = []
 
     z_top, z_mid, z_bot = sgn * eps, sgn * t / 2, sgn * (t - eps)
-    loops = cut(shape, z_top, step)
-    if not loops:
+    top = cut(shape, z_top, step, jt)
+    if not top:
         return [], [], [f"the part has no metal just {side == 'drag' and 'below' or 'above'} the parting plane "
                         f"(ingates in the {side})"]
-    band = {z_top: loops, z_mid: cut(shape, z_mid, step), z_bot: cut(shape, z_bot, step)}
+    band = {z_top: top, z_mid: cut(shape, z_mid, step, jt), z_bot: cut(shape, z_bot, step, jt)}
+    # the outline the ingate's end face meets: the part at the ingate's mid height (right at the parting
+    # plane a part can carry a lip or a land the ingate passes over)
+    loops = band[z_mid] or top
     holes = sum(lp.depth % 2 for lp in loops)
     if holes:
         issues.append(f"{holes} hole(s) in the parting-line cut are cores: no ingates there")
@@ -346,6 +358,8 @@ def find(shape, modulus: dict, field: dict, values: dict, st: dict, face_tags=()
         for p in patches(lp, k):
             mid = wk.at(p.start + p.length / 2)
             why = []
+            if p.face < 0:
+                why.append("outline_gap")        # a stretch that only closes a gap in the cut: no face
             if p.face in tagged:
                 why.append("tagged_face")
             if p.length < min_contact - 1e-9:
@@ -368,6 +382,12 @@ def find(shape, modulus: dict, field: dict, values: dict, st: dict, face_tags=()
                 ss = np.linspace(lo, hi, 9)
                 bulge = max(float(((wk.at(ss) - c) @ nrm).max()), 0.0)
                 v0 = bulge + max(2 * step, eps)
+                # metal just inside the contact and sand just outside, at the top of the band: a loop
+                # taken the wrong way round (touching loops in a bad part file) points into the metal
+                probe = np.array([c - 2 * step * nrm, c + 2 * step * nrm])
+                if not (inside(probe[:1], loops)[0] and not inside(probe[1:], loops)[0]):
+                    discard(c, p.face, p.length, ["not_outward"])
+                    continue
                 us = np.linspace(-w / 2, w / 2, 5)      # five lines across the ingate
                 vs = np.arange(v0, reach + 1e-9, max(min(step, t / 2), 0.25))
                 grid = (c[None, None] + us[:, None, None] * tan + vs[None, :, None] * nrm).reshape(-1, 2)

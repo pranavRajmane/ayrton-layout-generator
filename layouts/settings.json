@@ -4,9 +4,14 @@
     "symmetry.voxel_mm",
     "ingates.parting_tolerance_mm",
     "ingates.outline_step_mm",
+    "ingates.join_tolerance_mm",
     "runners.footprint_deflection_mm",
     "layouts.hausdorff_tolerance_mm",
     "layouts.count_threshold",
+    "layouts.search_tolerance_mm",
+    "layouts.duplicate_tolerance_mm",
+    "layouts.search_outline_tolerance_mm",
+    "layouts.riser_keepout_radius_factor",
     "layouts.free_sprue_positions",
     "modulus.voxel_fraction_of_min_wall",
     "modulus.voxel_min_mm",
@@ -66,10 +71,15 @@
   "ingates": {
     "parting_tolerance_mm": 0.01,
     "outline_step_mm": 0.5,
+    "join_tolerance_mm": 0.05,
     "known_rules": ["feeds_heaviest_zone", "feeds_hot_spot_zone", "no_impingement"]
   },
   "layouts": {
     "count_threshold": 5000,
+    "search_tolerance_mm": 0.05,
+    "duplicate_tolerance_mm": 0.5,
+    "search_outline_tolerance_mm": 0.2,
+    "riser_keepout_radius_factor": 2.0,
     "hausdorff_tolerance_mm": 0.01,
     "free_sprue_positions": [
       "centre",

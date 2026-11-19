@@ -2,8 +2,9 @@
 
 Each cavity k has its ingate contact q_k and outward normal n_k (the layout's ingate candidate, carried
 by the cavity's transform).  The runner meets the ingate at the *foot* f_k = q_k + d n_k.  For a tree or radial runner
-d = runner-to-cavity clearance + half the runner's width: the runner's edge is exactly the clearance
-off the contact, and the ingate bridges it.  The templates join the sprue S to the feet:
+d = the layout's ``arrangement.runner_offset_mm`` (Phase 3 places the cavities with it), else
+the least it may be: runner-to-cavity clearance + half the runner's width (the runner's edge exactly
+the clearance off the contact); the ingate bridges it.  The templates join the sprue S to the feet:
 
   straight  one runner through S at right angles to the ingates; each ingate runs from its contact
             to it (at least that d long); it runs on past the outermost feet by the recipe's
@@ -32,6 +33,7 @@ import math
 import time
 
 import numpy as np
+import shapely
 from shapely import affinity
 from shapely.geometry import LineString, Point, box
 from shapely.ops import unary_union
@@ -54,6 +56,15 @@ def _unit(v) -> np.ndarray:
     return v / np.linalg.norm(v)
 
 
+def mirror(geom, centre, axis_deg):
+    """Reflect a shapely geometry in the line through centre at axis_deg."""
+    t = math.radians(axis_deg)
+    c, s_ = math.cos(2 * t), math.sin(2 * t)
+    g = affinity.translate(geom, -centre[0], -centre[1])
+    g = affinity.affine_transform(g, [c, s_, s_, -c, 0, 0])
+    return affinity.translate(g, centre[0], centre[1])
+
+
 def _rot(p, centre, deg) -> np.ndarray:
     c, s = math.cos(math.radians(deg)), math.sin(math.radians(deg))
     d = np.asarray(p, float) - centre
@@ -73,7 +84,7 @@ class Skeleton:
         return len(self.arms) - 1
 
 
-def straight_feet(S, q, normals, d_min) -> tuple[list[np.ndarray], list[float]]:
+def straight_feet(S, q, normals, d_min, strict=True) -> tuple[list[np.ndarray], list[float]]:
     """A straight runner lies on the line through S square to the ingates; each ingate runs from its
     contact to that line (at least d_min long)."""
     n0 = normals[0]
@@ -82,7 +93,7 @@ def straight_feet(S, q, normals, d_min) -> tuple[list[np.ndarray], list[float]]:
     feet, ds = [], []
     for k, (qk, nk) in enumerate(zip(q, normals)):
         d = float((S - qk) @ nk)
-        if d < d_min - 1e-6:
+        if strict and d < d_min - 1e-6:
             raise Reject("runner.too_close", f"cavity {k}'s contact is {d:.1f} mm from the runner line; it needs "
                          f"{d_min:.1f} (clearance + half the runner)", value=round(d, 3), limit=round(d_min, 3))
         feet.append(qk + d * nk)
@@ -117,7 +128,9 @@ def _radial(S, feet, normals) -> tuple[Skeleton, list[int]]:
     return sk, [1] * len(feet)
 
 
-def _tree(S, feet, normals, tol) -> tuple[Skeleton, list[int]]:
+def _tree(S, feet, normals, tol, axes=None) -> tuple[Skeleton, list[int]]:
+    """``axes``: the split direction (degrees) at each level, when the layout states them (Phase 3
+    does); otherwise the feet's principal axis about the junction."""
     sk = Skeleton()
     depth = [0] * len(feet)
 
@@ -130,8 +143,12 @@ def _tree(S, feet, normals, tol) -> tuple[Skeleton, list[int]]:
             depth[k] = level
             return
         P = np.array([feet[i] - J for i in idx])
-        w, V = np.linalg.eigh(P.T @ P)
-        axis = V[:, int(np.argmax(w))]
+        if axes is not None and level - 1 < len(axes):
+            th = math.radians(axes[level - 1])
+            axis = np.array([math.cos(th), math.sin(th)])
+        else:
+            w, V = np.linalg.eigh(P.T @ P)
+            axis = V[:, int(np.argmax(w))]
         axis = axis if (axis[0] > 1e-12 or (abs(axis[0]) <= 1e-12 and axis[1] > 0)) else -axis
         proj = P @ axis
         if np.min(np.abs(proj)) < 1e-6:
@@ -197,8 +214,11 @@ class Context:
         self.scale = 1 + float(self.values["shrinkage_pct"]) / 100
 
 
-def route(layout: dict, ctx: Context) -> dict:
-    """The runner record for a layout (``runners`` item), or raise Reject."""
+def route(layout: dict, ctx: Context, sizing: dict | None = None, settle_only: bool = False) -> dict:
+    """The runner record for a layout (``runners`` item), or raise Reject.  ``sizing``: a sizing
+    result to use as it is (Phase 3 holds the sizes while it searches for the tightest spacing);
+    by default the layout is sized here.  ``settle_only``: return the sizing alone (with ``_sizes``),
+    before any fit is judged."""
     v = ctx.values
     lay = v["layout"]
     cl = lay["clearance"]
@@ -213,20 +233,27 @@ def route(layout: dict, ctx: Context) -> dict:
     tol = float(ctx.settings["hausdorff_tolerance_mm"])
     ext = float(lay["runner"]["extension_mm"])
 
-    def geometry(sizes):
+    def geometry(sizes, strict=True):
         w = max(sizes["runners"][-1].d["top"], sizes["runners"][-1].d["bottom"])
         d_min = float(cl["runner_cavity_mm"]) + w / 2
-        ds = [d_min] * n
         if template == "straight":
-            feet, ds = straight_feet(S, q, nrm, d_min)
+            feet, ds = straight_feet(S, q, nrm, d_min, strict)
         else:
-            feet = [qk + d_min * nk for qk, nk in zip(q, nrm)]
+            # the layout's own runner offset (Phase 3 places the cavities with it), at least d_min
+            d = float(layout.get("arrangement", {}).get("runner_offset_mm", d_min))
+            if not strict:
+                d = max(d, d_min)                # trial sizes while sizing: judged once settled
+            if d < d_min - 1e-6:
+                raise Reject("runner.too_close", f"the runner runs {d:.1f} mm from the contacts; it needs "
+                             f"{d_min:.1f} (clearance + half the runner)", value=round(d, 3), limit=round(d_min, 3))
+            ds = [d] * n
+            feet = [qk + d * nk for qk, nk in zip(q, nrm)]
         if template == "straight":
             sk, depth = _straight(S, feet, nrm)
         elif template == "radial":
             sk, depth = _radial(S, feet, nrm)
         else:
-            sk, depth = _tree(S, feet, nrm, tol)
+            sk, depth = _tree(S, feet, nrm, tol, layout.get("arrangement", {}).get("split_axes_deg"))
         # leaf arms: does the ingate continue the arm (end-fed) or leave its side (tap: run on)?
         arms = [list(a) for a in sk.arms]
         for i, (lv, a, b, leaf) in enumerate(sk.arms):
@@ -249,7 +276,7 @@ def route(layout: dict, ctx: Context) -> dict:
         return feet, ds, sk, arms, depth
 
     def gating_volume(sizes):
-        feet, ds, sk, arms, _ = geometry(sizes)
+        feet, ds, sk, arms, _ = geometry(sizes, strict=False)
         vol = sizes["sprue_length"] / 3 * (sizes["sprue_top"].area + sizes["sprue_bottom"].area
                                             + math.sqrt(sizes["sprue_top"].area * sizes["sprue_bottom"].area))
         vol += sum(np.linalg.norm(b - a) * sizes["runners"][lv - 1].area for lv, a, b, _ in arms)
@@ -257,9 +284,13 @@ def route(layout: dict, ctx: Context) -> dict:
         return vol
 
     zlo, zhi = ctx.z_range
-    sizing = sz.size(values=v, casting_volume_mm3=ctx.casting_volume, n=n, z_top=zhi, z_bottom=zlo,
-                     thickest_mm=ctx.thickest, cope_height=float(ctx.flask["cope_height"]), branches=branches,
-                     gating_volume=gating_volume)
+    if sizing is None:
+        sizing = sz.size(values=v, casting_volume_mm3=ctx.casting_volume, n=n, z_top=zhi, z_bottom=zlo,
+                         thickest_mm=ctx.thickest, cope_height=float(ctx.flask["cope_height"]),
+                         branches=branches, gating_volume=gating_volume)
+    if settle_only:                 # Phase 3: just the settled sizes, whether or not they fit yet
+        return sizing
+    sizing = dict(sizing)
     sizes = sizing.pop("_sizes")
     feet, ds, sk, arms, depth = geometry(sizes)
     checks: list[dict] = []
@@ -336,7 +367,9 @@ def route(layout: dict, ctx: Context) -> dict:
 
     L, Wf = float(ctx.flask["length"]), float(ctx.flask["width"])
     inner = box(-L / 2, -Wf / 2, L / 2, Wf / 2).buffer(-float(cl["flask_wall_mm"]), join_style="mitre")
-    system = unary_union(bands + gates + [sp])
+    # unioned, then closed and opened by 1e-4 mm: a union of abutting bands can keep a zero-width
+    # sliver on one side and not the other, which a Hausdorff check reads as a 2 mm asymmetry
+    system = unary_union(bands + gates + [sp]).buffer(1e-4, join_style="mitre").buffer(-1e-4, join_style="mitre")
     check("runner.inside_flask", inner.contains(system), None, float(cl["flask_wall_mm"]))
 
     # symmetry: the system onto itself
@@ -345,7 +378,10 @@ def route(layout: dict, ctx: Context) -> dict:
     worst = 0.0
     for deg in turns:
         img = affinity.rotate(system, deg, origin=tuple(S))
-        worst = max(worst, img.hausdorff_distance(system))
+        worst = max(worst, shapely.hausdorff_distance(img.boundary, system.boundary, densify=0.25))
+    for th in layout.get("arrangement", {}).get("mirror_axes_deg", []) if sym.startswith("d") else []:
+        img = mirror(system, S, th)
+        worst = max(worst, shapely.hausdorff_distance(img.boundary, system.boundary, densify=0.25))
     check("runner.symmetric", worst <= tol, round(worst, 6), tol)
 
     # areas on the ratio

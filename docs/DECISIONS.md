@@ -322,9 +322,17 @@ Architectural choices and why, newest last.  Foundry numbers are never decided h
     Convergence tests are marked `slow` (`pytest -m slow`).
 62. **Layout generator Phase 2: ingate candidates** (2026-11-19, `layouts/ingates.py`, job schema 1.1).
     An ingate is the CAD module's flat bar on the parting plane, in the drag (z -t..0) or the cope, run
-    straight out from the part. Candidates are stations on the part's *outer* outline just off the
-    parting plane on that side (an OCCT section, each segment knowing its B-rep face); holes in the cut
-    are cores and give none. The outline is split into one patch per face; a tagged face or a patch
+    straight out from the part. Candidates are stations on the part's *outer* outline at the ingate's
+    mid height (an OCCT section, each segment knowing its B-rep face; right at the parting plane a part
+    can carry a lip or land the ingate passes over, as 15145827 does by production ingate 2); holes
+    in the cut are cores and give none. Section edges are joined end to end within 0.05 mm (that part
+    file's edges miss each other by up to 0.01 mm; at 0.001 mm a tenth of its loops stayed open and
+    were closed by a jump, which flipped them). Each loop is turned so the metal is on its left by
+    probing just beside its longest segment with the even-odd rule (a probe on the loop itself is
+    ambiguous where loops touch); counter-clockwise loops are outer, clockwise ones holes. A station
+    whose normal does not run from metal into sand is discarded as **not_outward** (a guard: with the
+    two fixes above, 21 of 15145827's stations). A stretch that only closes a gap the joining could
+    not (no face) is discarded as **outline_gap**: a stub there missed the part by 0.9 mm. The outline is split into one patch per face; a tagged face or a patch
     shorter than the recipe's minimum contact is discarded whole. Stations sit along each patch with
     the whole ingate on it, `merge_distance` apart; then a station within `merge_distance` of one on a
     longer contact joins it (`merged_from`). A station is discarded, with its reason, when:
@@ -348,7 +356,9 @@ Architectural choices and why, newest last.  Foundry numbers are never decided h
     analysis panel can show why a stretch of parting line has no candidate; 1.0 jobs load as 1.1.
     Validation: synthetic parts (on the line, outward, merged, tagged, short, too heavy, core and thin
     flags, cope side, every stub fused into one valid solid, deterministic) and, marked slow, the six
-    production drag ingates of 15145827: each has a candidate within 2-9 mm facing the same way.
+    production drag ingates of 15145827: each has a candidate within 2.3-8.7 mm facing the same way
+    (88 candidates on that part). That part file fails BRepCheck itself, so a stub's union is judged
+    against it: one solid, and volumes adding up to 0.1 % of the stub or 1e-5 of the part.
 63. **Layout generator Phase 4: sizing and symmetric runners** (2026-11-19, `layouts/sizing.py`,
     `layouts/runners.py`, `layouts/footprint.py`). Built before Phase 3 at the engineer's request, on
     hand-built layouts; Phase 3 will produce layouts that fit these templates.
@@ -365,9 +375,9 @@ Architectural choices and why, newest last.  Foundry numbers are never decided h
       A_i/N, recipe thickness, width = area / thickness. Runner trapezoid: height = ratio x bottom,
       top = (1 - taper) x bottom (`core.workflow.runner_widths`). Sprue round: bottom = A_s, top by
       continuity over the basin head (`sprue_top_area`).
-    - **Routing**: the runner meets each ingate at its foot, clearance + half the runner's width out
-      from the contact along the ingate's normal (straight: wherever the ingate reaches the runner
-      line, at least that far). straight = one line through the sprue square to every ingate, run on
+    - **Routing**: the runner meets each ingate at its foot, the layout's runner offset out from the
+      contact along the ingate's normal, at least clearance + half the runner's width (straight:
+      wherever the ingate reaches the runner line, at least that far). straight = one line through the sprue square to every ingate, run on
       by the extension; radial = an arm from the sprue to each foot, the ingate continuing it; h / tree
       = balanced binary splits, each into two halves that are each other's half-turn about the
       junction (the sprue first), arms to the halves' centres; a leaf arm's ingate continues it or
@@ -378,10 +388,43 @@ Architectural choices and why, newest last.  Foundry numbers are never decided h
       or cope slab footprint) by the clearance; no runner crossing another except at its own
       junctions; ingates clear of other cavities; sprue (top diameter) clear of cavities by the sprue
       clearance; everything inside the flask less the wall clearance; Hausdorff of the system onto its
-      own symmetry images within 0.01 mm; areas on the ratio within 2 %; the resized ingate's bar
+      own symmetry images within 0.01 mm (outlines, densified, after closing and opening the union by
+      1e-4 mm: a union of abutting bands can keep a zero-width sliver on one side only, which a plain
+      Hausdorff check read as 2 mm); areas on the ratio within 2 %; the resized ingate's bar
       modulus still below its zone's. Unroutable shapes (not square, not balanced, an H not of 4, a
       tree not of 2^k, a radial ingate not facing the sprue, a contact too close to the runner line)
       reject with a code before the checks.
     - **Footprints**: projected mesh triangles unioned with shapely (new dependency, conda-forge
       2.2), grown by the mesh deflection (0.05 mm) so a chord never undercuts the outline; a slab
       footprint is the part cut between two heights first.
+64. **Layout generator Phase 3: cavity layouts** (2026-11-19, `layouts/arrange.py`). Built after
+    Phase 4, so it places cavities the way the runner templates need them. The orbit representative is
+    the part turned 0 / 90 / 180 / 270 degrees with one ingate candidate; the rest follow from turns:
+    - **row / straight**: k cavities along one runner line through the sprue, ingates square to it;
+      the other side is their half-turn about the sprue (c2) or their mirror image across the runner
+      (d1, only for a mirror-symmetric part); N = 2k, and N = 1 beside the sprue (c1). Rows of three or
+      more a side give unequal paths, so Phase 4 rejects them; they are kept to show why.
+    - **grid / h, tree**: an H-tree of balanced half-turn splits, directions alternating, N = 2^m
+      (m = 2 is the H); the ingate continues the leaf arm ("end") or leaves its side ("side"). The
+      split directions go in `arrangement.split_axes_deg` so Phase 4 splits the same way.
+    - **radial**: four cavities turned 90 degrees about the sprue, ingates facing it (c4).
+    Mirror symmetry: voxel IoU of the part with its mirror in the upright planes through its centroid
+    (Phase 1 grid) above `symmetry.mirror_iou_min`. The sprue is at the flask centre (free mode) or
+    where the engineer put it (fixed): every layout is symmetric about its sprue, so sliding it along
+    a centre line only moves the layout toward a wall.
+    **Tightest placement**: the free lengths (pitch, runner offset, arm lengths, radius) start large
+    and are shrunk one at a time by bisection (0.05 mm) while cavities stay apart and the runners,
+    ingates and sprue stay clear (the Phase 4 checks with the sizes held), on outlines simplified and
+    grown by 0.2 mm so they contain the exact ones; the runner is re-sized for the placed layout and the
+    lengths re-shrunk until the runner width holds (a few rounds). Then the hard checks on the exact
+    outlines: flask wall, cope and drag room (checked first: when it fails no layout can fit),
+    cavity, sprue and runner clearances, the cavities mapping onto themselves under the layout's
+    symmetry, and riser keep-outs (off by default: circles of 2 x the hot-spot radius, a placeholder).
+    A series stops growing at its first flask-wall rejection.
+    **Count first**: the combinations are counted before any is placed (N bounded by flask area /
+    footprint area); above the threshold the phase fails with the count by family, for the engineer to
+    narrow. **Duplicates**: a layout's key is its template, sprue and each cavity's placed centroid and
+    contact, minimised over the flask's own symmetries (half-turn; quarter-turns for a square flask;
+    its mirror lines for a mirror-symmetric part); a repeat is dropped and counted.
+    Hand check (the test): the block 100 x 60 x 40 in a 1000 x 800 flask gives rows up to N = 14 along
+    x and 12 along y (pitch 101 + 25 mm), exactly as counted by hand.

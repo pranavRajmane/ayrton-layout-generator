@@ -253,7 +253,7 @@
                   "contact_face": {"type": ["integer", "null"], "minimum": 0},
                   "contact_length": {"$ref": "#/$defs/nonneg"},
                   "reasons": {"type": "array", "minItems": 1, "uniqueItems": true,
-                              "items": {"enum": ["tagged_face", "short_contact", "blocked", "ingate_not_thinner", "no_zone"]}},
+                              "items": {"enum": ["tagged_face", "short_contact", "blocked", "ingate_not_thinner", "no_zone", "not_outward", "outline_gap"]}},
                   "detail": {"type": "string"}
                 }
               }
