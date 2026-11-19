@@ -1,29 +1,61 @@
 {
   "_about": "Numerical settings of the layout generator: tolerances and resolution, not foundry numbers (those are in presets/<process>_<alloy>.json under 'layout'). Values marked in _proposed are the module's starting choices, to be confirmed; the rest come from the task spec.",
   "_proposed": [
-    "modulus.voxel_fraction_of_min_wall",
-    "modulus.voxel_min_mm",
-    "modulus.hot_spot_min_rise_voxels",
     "symmetry.voxel_mm",
     "ingates.parting_tolerance_mm",
     "layouts.hausdorff_tolerance_mm",
     "layouts.count_threshold",
-    "layouts.free_sprue_positions"
+    "layouts.free_sprue_positions",
+    "modulus.voxel_fraction_of_min_wall",
+    "modulus.voxel_min_mm",
+    "modulus.max_voxels",
+    "modulus.min_wall_rays",
+    "modulus.min_wall_percentile",
+    "modulus.mesh_relative_deflection",
+    "modulus.mesh_angular_deflection_rad",
+    "modulus.sample_spacing_fraction",
+    "modulus.plateau_slope_max",
+    "modulus.plateau_core_fraction",
+    "modulus.plateau_core_min_voxels",
+    "modulus.hot_spot_min_rise_voxels",
+    "modulus.ball_spacing_fraction",
+    "modulus.same_thickness_tol",
+    "modulus.sphere_spacing_fraction"
   ],
   "alloys": {
-    "grey_iron": {"label": "Grey cast iron (CI)"},
-    "sg_iron": {"label": "Ductile / SG iron"}
+    "grey_iron": {
+      "label": "Grey cast iron (CI)"
+    },
+    "sg_iron": {
+      "label": "Ductile / SG iron"
+    }
   },
   "processes": {
-    "green_sand": {"label": "Green sand"},
-    "no_bake": {"label": "No-bake"}
+    "green_sand": {
+      "label": "Green sand"
+    },
+    "no_bake": {
+      "label": "No-bake"
+    }
   },
   "modulus": {
-    "voxel_fraction_of_min_wall": 0.125,
+    "voxel_fraction_of_min_wall": 0.1,
     "voxel_min_mm": 0.5,
+    "max_voxels": 20000000,
+    "min_wall_rays": 2000,
+    "min_wall_percentile": 2.0,
+    "mesh_relative_deflection": 0.1,
+    "mesh_angular_deflection_rad": 0.2,
+    "sample_spacing_fraction": 0.5,
+    "ball_spacing_fraction": 0.5,
+    "sphere_spacing_fraction": 0.15,
+    "plateau_slope_max": 0.1,
+    "plateau_core_fraction": 0.5,
+    "plateau_core_min_voxels": 2.0,
+    "same_thickness_tol": 0.05,
     "hot_spot_min_rise_voxels": 1.0,
     "analytic_tolerance_pct": 3.0,
-    "convergence_tolerance_pct": 3.0
+    "convergence_tolerance_pct": 5.0
   },
   "symmetry": {
     "mirror_iou_min": 0.99,
@@ -35,7 +67,11 @@
   "layouts": {
     "count_threshold": 5000,
     "hausdorff_tolerance_mm": 0.01,
-    "free_sprue_positions": ["centre", "centre_line_x", "centre_line_y"]
+    "free_sprue_positions": [
+      "centre",
+      "centre_line_x",
+      "centre_line_y"
+    ]
   },
   "runners": {
     "path_length_tolerance_pct": 0.5,

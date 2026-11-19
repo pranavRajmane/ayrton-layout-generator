@@ -26,3 +26,5 @@ layouts = ["schema/*.json", "settings.json", "recipe_keys.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["slow: long runs (Phase 1 convergence); run with -m slow"]
+addopts = "-m 'not slow'"

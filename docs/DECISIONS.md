@@ -269,3 +269,54 @@ Architectural choices and why, newest last.  Foundry numbers are never decided h
     values each phase needs is data (`layouts/recipe_keys.json`). Tolerances given in the task are in
     `settings.json`; the module's own starting choices are listed there under `_proposed`. Tests use
     invented, clearly marked recipes in `tests/layouts/recipes/`, never the presets.
+61. **Layout generator Phase 1: modulus, zones, hot spots** (2026-11-19, `layouts/modulus.py`). Zones are
+    *members plus junction nodes* (the engineer's choice: L 3, T 4, X 5, a stepped plate 2), not one
+    zone per distance maximum (a pure watershed makes an equal-wall L, T or X one zone). Halving the
+    voxel moves every zone modulus by under 5 % (the engineer's limit; the solidification run is the
+    final check), with two known exceptions: the turned T junction (6.7 %) and the X junction (5.8 %).
+    A junction cools almost only through strips by its inside corners, so moving its cut one voxel
+    along an arm changes its modulus about 8 % (plates of t at t/10 voxels: 1.1 t^2 / 1.2 t), while an
+    arm, uniform along its length, does not change. The cut sits on a smooth thickness ramp read off
+    voxels and moves with the staircase; about six cut rules each fixed one case and broke another.
+    The likely fix, not done: cut across each arm through the points where the junction's largest
+    sphere touches the surface (the inscribed-circle hand method), which does not depend on voxels.
+    How:
+    - **Voxels**: column rasterisation of the mesh with a winding count; a column whose crossings do not
+      sum to zero went through a gap in the mesh and is cast again on the exact solid (21 columns on
+      the 4,313-face part, which had made air into metal and three false hot spots of 45-98 mm).
+    - **Inscribed spheres from the surface, not the voxels** (shrinking ball, Ma et al. 2012): from
+      surface samples and from points along the part's edges (the sphere filling an X or T junction
+      touches only the inside-corner edges). Normals are interpolated from the mesh vertices within
+      each face (facet normals make a cylinder a prism with tiny spheres at each facet edge). Samples:
+      strips from the corner opposite a triangle's shortest edge, so a long thin triangle gets points
+      by its size (subdividing by the longest edge gave 666 k points and 330 s on a 90 k mm2 part).
+    - Spheres are thinned before painting to one per cell of 0.15 x their radius (never under half a
+      voxel): painting work falls with the square of the spacing, and the spacing no longer moves
+      with the voxel size (at 0.25 the turned X moved 3.6 % on halving).
+    - **Local thickness** = diameter of the largest sphere covering a voxel; among spheres within 2 %
+      of it, the nearest centre owns the voxel (equal spheres along a member otherwise gave it to
+      whichever was painted last, and an X junction's volume swung 10 %).
+    - **Zones**: seeds are the cores of flat regions of the thickness (voxels at least half their
+      sphere's radius, and 2 voxels, in from the region's edge; a thin layer of the same thickness
+      cannot join two arms). Every other voxel takes the zone of its nearest core. Touching zones of
+      the same thickness (within 5 %) merge only when the seam is that thick too and at least half a
+      thickness squared in area (a member split by noise, not two walls meeting over a bridge, nor two
+      arms of an X touching at its end faces). Flooding with moves along ramps chained round thick
+      members (stepped plate 17.2 against 15.1 by hand) and was dropped.
+    - **Every voxel and every bit of surface joins the zone of its largest covering / touching
+      sphere's centre.** A centre goes to the zone whose core spheres (spheres centred in its core)
+      cover it, the one nearest in thickness to the exact thickness at that point if several do;
+      a centre no core sphere covers takes the zone of the voxel holding it. So the outer corner of an L goes to
+      the corner block (M about 8 for t = 20, as the hand method has it).
+    - **Zone modulus = V / A**: voxel volumes scaled to the exact solid volume; B-rep face areas (the
+      mesh's where OCCT's is broken: the 4,313-face part gives a total of -7e20). r / 3 is only the
+      heatmap field (exact in a sphere, t/6 in a plate).
+    - **Hot spots**: maxima of the distance to the surface rising more than a voxel above every path
+      to higher ground.
+    - **Voxel size** = thinnest wall / 10 (at / 8 a turned T junction moved 3.1 % on halving), at least
+      0.5 mm, at most 20 M voxels. The thinnest wall comes from inward rays; a ray starting off the
+      metal (a bore's mesh chord) is measured from where it enters; hits within 0.5 mm (coincident
+      faces) are left out and reported.
+    - The zone loops work on flat indices of the undecided voxels only (identical output, 4-10x faster).
+    Every numerical knob is in `layouts/settings.json` under `modulus`, listed as proposed.
+    Convergence tests are marked `slow` (`pytest -m slow`).
