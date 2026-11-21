@@ -358,9 +358,35 @@ def route(layout: dict, ctx: Context, sizing: dict | None = None, settle_only: b
     g_hit = [(k, m) for k in range(n) for m in range(n) if m != k and cav_band[m] is not None
              and gates[k].intersects(cav_band[m])]
     check("ingate.clear_of_other_cavities", not g_hit, len(g_hit), 0)
+    # an ingate runs only into its own runner: one that crosses another arm (near a junction, where a
+    # short leaf arm brings it) would make two flows meet
+    # (with the CAD module's embed: every element runs that far past its ends, so a clearance smaller
+    # than that is an overlap once built)
+    from core.element import EMBED
+    emb = float(EMBED.default)
+    live = [(lv, a, b) for lv, a, b, _ in arms if np.linalg.norm(b - a) > 1e-9]
+    r_hit = []
+    for k in range(n):
+        u = _unit(q[k] - feet[k]) if np.linalg.norm(q[k] - feet[k]) > 1e-9 else np.zeros(2)
+        g_emb = LineString([feet[k] - emb * u, q[k]]).buffer(w_i / 2 + 1e-6, cap_style="flat")
+        for i, (lv, a, b) in enumerate(live):
+            if LineString([a, b]).distance(Point(feet[k])) < 1e-6:
+                continue                                       # its host (the foot lies on it)
+            ua = _unit(b - a)
+            w = max(rsec[lv - 1].d["top"], rsec[lv - 1].d["bottom"])
+            band = LineString([a - emb * ua, b + emb * ua]).buffer(w / 2, cap_style="flat")
+            if g_emb.intersects(band):
+                r_hit.append((k, i))
+    check("ingate.clear_of_runners", not r_hit, len(r_hit), 0,
+          f"cavity {r_hit[0][0]}'s ingate crosses runner arm {r_hit[0][1]}" if r_hit else None)
 
-    r_sprue = sizes["sprue_top"].d["d"] / 2
+    r_sprue = max(sizes["sprue_top"].d["d"], sizes["sprue_bottom"].d["d"]) / 2     # its widest end
     sp = Point(S).buffer(r_sprue)
+    # the sprue runs down through the runners to their floor: no ingate may start inside it
+    g_sp = [k for k in range(n) if LineString([feet[k] - emb * (_unit(q[k] - feet[k]) if np.linalg.norm(q[k] - feet[k]) > 1e-9
+                                                            else np.zeros(2)), q[k]]).buffer(w_i / 2).intersects(sp)]
+    check("ingate.clear_of_sprue", not g_sp, len(g_sp), 0,
+          f"cavity {g_sp[0]}'s ingate starts under the sprue" if g_sp else None)
     gap = min(sp.distance(c) for c in cav_all)
     check("sprue.clear_of_cavities", gap >= float(cl["cavity_sprue_mm"]) - 1e-6, round(gap, 3),
           float(cl["cavity_sprue_mm"]))
@@ -386,7 +412,7 @@ def route(layout: dict, ctx: Context, sizing: dict | None = None, settle_only: b
 
     # areas on the ratio
     a_s, a_r, a_i = sizing["sprue_area_mm2"], sizing["runner_area_mm2"], sizing["ingate_area_mm2"]
-    built = [sizes["sprue_bottom"].area, max(b * s.area for b, s in zip(branches, rsec)), n * sizes["ingate"].area]
+    built = [sizes["sprue_top"].area, max(b * s.area for b, s in zip(branches, rsec)), n * sizes["ingate"].area]
     worst_pct = max(abs(b / r - 1) * 100 for b, r in zip(built, (a_s, a_r, a_i)))
     check("gating.ratio", worst_pct <= ctx.settings["area_ratio_tolerance_pct"], round(worst_pct, 6),
           ctx.settings["area_ratio_tolerance_pct"])

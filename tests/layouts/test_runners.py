@@ -59,7 +59,7 @@ def layout(job, lid, template, cavs, sym="c2", n=None, ingate=None):
 
 
 def straight2(job):
-    a = cav(0, 0, (0, 90))
+    a = cav(0, 0, (60, 90))                  # 60 mm along the runner: its ingate clears the sprue
     return layout(job, "straight2", "straight", [a, half_turn(a, (0, 0), 1)])
 
 
@@ -125,7 +125,8 @@ def test_sizing_matches_the_hand_calculation(base):
     assert s["ingate"]["dims"]["height"] == 5.0
     assert s["ingate"]["dims"]["width"] * 5.0 == pytest.approx(s["ingate_area_mm2"] / 2, rel=1e-6)
     tr = s["runner_levels"][0]["section"]["dims"]
-    assert tr["height"] == pytest.approx(tr["bottom"]) and tr["top"] == pytest.approx(0.85 * tr["bottom"])
+    # a drag runner: widest on the parting plane (its top), 15 % narrower at its bottom, as high as wide
+    assert tr["height"] == pytest.approx(tr["top"]) and tr["bottom"] == pytest.approx(0.85 * tr["top"])
     assert "sprue" in segs
 
 
@@ -164,6 +165,13 @@ def test_ingates_meet_the_cavities_at_the_candidate(base):
 
 
 # ---- rejections -------------------------------------------------------------------------------
+def test_an_ingate_under_the_sprue_is_rejected(base):
+    job, ctx = base
+    lay = dict(straight2(job), cavities=[cav(0, 0, (0, 90)), cav(1, 180, (0, -90))])
+    bad = {c["code"] for c in route(ctx, lay)["validation"] if not c["passed"]}
+    assert "ingate.clear_of_sprue" in bad
+
+
 def test_off_centre_ingates_on_one_straight_runner_are_unequal(base):
     job, ctx = base
     g = next(c for c in job.data["ingate_candidates"]["candidates"]
@@ -176,7 +184,7 @@ def test_off_centre_ingates_on_one_straight_runner_are_unequal(base):
 
 
 @pytest.mark.parametrize("edit, code", [
-    (lambda job: dict(straight2(job), cavities=[cav(0, 0, (0, 40)), cav(1, 180, (0, -40))]), "runner.too_close"),
+    (lambda job: dict(straight2(job), cavities=[cav(0, 0, (60, 40)), cav(1, 180, (-60, -40))]), "runner.too_close"),
     (lambda job: dict(h4(job), n=2, cavities=h4(job)["cavities"][:2]), "runner.h_count"),
     (lambda job: dict(h4(job), cavities=[dict(c, translation=[c["translation"][0] + (7 if c["index"] == 0 else 0),
                                                                 c["translation"][1]]) for c in h4(job)["cavities"]]),

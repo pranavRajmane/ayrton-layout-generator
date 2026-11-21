@@ -45,7 +45,7 @@ from layouts import runners as rn
 from layouts import sizing as sz
 
 GEOMETRIC = ("runner.clear_of_cavities", "runner.no_crossing", "ingate.clear_of_other_cavities",
-             "sprue.clear_of_cavities")
+             "ingate.clear_of_runners", "ingate.clear_of_sprue", "sprue.clear_of_cavities")
 
 
 class CountExceeded(Exception):
@@ -170,10 +170,12 @@ class Arranger:
         S = self.sprue
         n = self.normal(g, r)
         t = np.array([-n[1], n[0]])
+        # one cavity a side (or alone) sits p / 2 along the runner, so its ingate clears the sprue
         if k == 0:                                           # one cavity beside the sprue
-            cavs = [self.rep(g, r, S - D * n)]
-            return cavs, {"per_side": 0, "pitch_mm": 0.0, "runner_offset_mm": D, "runner_axis_deg": _ang(t)}, "c1"
-        reps = [self.rep(g, r, S + (j - (k - 1) / 2) * p * t - D * n, orbit=j) for j in range(k)]
+            cavs = [self.rep(g, r, S + p / 2 * t - D * n)]
+            return cavs, {"per_side": 0, "pitch_mm": p, "runner_offset_mm": D, "runner_axis_deg": _ang(t)}, "c1"
+        along = [p / 2] if k == 1 else [(j - (k - 1) / 2) * p for j in range(k)]
+        reps = [self.rep(g, r, S + s_ * t - D * n, orbit=j) for j, s_ in enumerate(along)]
         if mode == "c2":
             imgs = [half_turn(c, S) for c in reps]
         else:
@@ -276,7 +278,8 @@ class Arranger:
         for s in rec["segments"]:
             pts = [x[:2] for x in s["points"]]
             if s["role"] == "sprue":
-                bands.append(shapely.Point(pts[0]).buffer(s["section"]["dims"]["d"] / 2))
+                sp = rec["sizing"]["sprue"]
+                bands.append(shapely.Point(pts[0]).buffer(max(sp["top"]["dims"]["d"], sp["bottom"]["dims"]["d"]) / 2))
             else:
                 w = max(s["section"]["dims"].get("width", 0), s["section"]["dims"].get("top", 0),
                         s["section"]["dims"].get("bottom", 0))
@@ -404,7 +407,7 @@ class Arranger:
                 def build(x, g=g, r=r):
                     return self.radial(g, r, x[0])
                 lay, sizing, prob = self.place(fam, tmpl, g, r, build, [2 * reach + 50],
-                                               [lambda s: self.d_min(s) + s["sprue"]["top"]["dims"]["d"] / 2], [0])
+                                               [lambda s: self.d_min(s) + max(s["sprue"]["top"]["dims"]["d"], s["sprue"]["bottom"]["dims"]["d"]) / 2], [0])
             if prob is None:
                 prob = self.hard(lay, sizing)
             yield lay, sizing, prob

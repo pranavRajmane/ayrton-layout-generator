@@ -1,7 +1,11 @@
 """An ingate drawn on the parting plane: a rectangle swept straight from a point
 on a runner to the part, flat face on the plane, in the drag (below) or the
-cope (above).  Geometry only: the width and thickness are typed by the user."""
-from core.element import Param, Section, register_element
+cope (above).  Geometry only: the width and thickness are typed by the user.
+With draft, its sides lean in away from the parting plane (the pattern draws
+out of the sand): a trapezoid of the same area, ``width`` its mean width."""
+import math
+
+from core.element import Param, Section, Severity, ValidationIssue, register_element
 from core.path import PathElement
 
 
@@ -24,10 +28,29 @@ class Ingate(PathElement):
         Param("bend_radius", unit="mm", default=0.0, min=0.0, max=0.0),
         Param("placed", choices=("drawn", "auto"), default="drawn",
               description="auto: put where its runner runs into the part, and moved with the runner"),
+        Param("draft_deg", unit="deg", default=0.0, min=0.0, max=30.0,
+              description="side draft: wider at the parting plane, the same area"),
     ]
 
+    def _lean(self, p) -> float:
+        return p.thickness * math.tan(math.radians(p.draft_deg))
+
     def section(self, p):
-        return Section.rectangle(p.width, p.thickness)
+        if p.draft_deg <= 0:
+            return Section.rectangle(p.width, p.thickness)
+        d = self._lean(p)
+        wide, narrow = p.width + d, max(p.width - d, 1e-6)
+        if p.side == "drag":                     # the parting plane is its top face
+            return Section.trapezoid(wide, narrow, p.thickness)
+        return Section.trapezoid(narrow, wide, p.thickness)
+
+    def validate(self, p, context):
+        if p.draft_deg > 0 and p.width - self._lean(p) <= 0:
+            return [ValidationIssue("ingate.draft_too_steep", Severity.ERROR,
+                                    f"{p.draft_deg:g} degrees of draft over {p.thickness:g} mm leaves no width at "
+                                    f"the far face of a {p.width:g} mm ingate", value=p.draft_deg,
+                                    instances=(context.instance_id,))]
+        return []
 
     def rise(self, p):
         return p.thickness / 2 if p.side == "cope" else -p.thickness / 2

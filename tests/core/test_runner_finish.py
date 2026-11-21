@@ -33,14 +33,15 @@ def length(pts):
 
 
 @pytest.mark.parametrize("side", ["drag", "cope"])
-def test_taper_makes_the_top_face_narrower(side):
+def test_taper_makes_the_face_away_from_the_parting_plane_narrower(side):
+    """The pattern draws out at the parting plane: the runner is widest there in both halves."""
     w_parting, w_far = workflow.runner_widths(side, 30.0, 15.0)
-    top, bottom = (w_parting, w_far) if side == "drag" else (w_far, w_parting)
-    assert bottom == pytest.approx(30.0) and top == pytest.approx(25.5)
+    assert w_parting == pytest.approx(30.0) and w_far == pytest.approx(25.5)
     from core.registry import REGISTRY
     el = REGISTRY.get("runner")()
     sec = el.section(el.resolve_params({"side": side, "w_parting": w_parting, "w_far": w_far, "height": 20.0}))
-    assert sec.d["top"] == pytest.approx(25.5) and sec.d["bottom"] == pytest.approx(30.0)
+    at_plane, away = (sec.d["top"], sec.d["bottom"]) if side == "drag" else (sec.d["bottom"], sec.d["top"])
+    assert at_plane == pytest.approx(30.0) and away == pytest.approx(25.5)
 
 
 @pytest.mark.parametrize("pct", [9.0, 21.0])

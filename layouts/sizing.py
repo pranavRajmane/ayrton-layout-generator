@@ -10,6 +10,9 @@ each step, the iterations) so an engineer can check it by hand.  The textbook fo
                 P = casting height above the gate level, C = casting height
     choke       A = G / (rho t C_d sqrt(2 g H_eff))
     areas       sprue : runner : ingate from the recipe's ratio, its smallest member being the choke
+    sprue       its narrow top takes the sprue area; its bottom opens by the recipe's draft over its
+                length (the pattern draws out at the parting plane, so the sprue is widest there:
+                the engineer, 2026-11-19; it was sized by continuity, wider at the top, before)
 
 Conventions (the engineer's choices, DECISIONS 63):
   - G = castings + sprue + runners + ingates (cup and well are left out: they come with the 3D build),
@@ -60,6 +63,7 @@ def size(*, values: dict, casting_volume_mm3: float, n: int, z_top: float, z_bot
     ratio = [float(x) for x in v["gating_ratios"]["default"]]
     formula = v["pour_time_formula"]
     basin = float(lay["sprue"]["basin_head_mm"])
+    draft = float(lay["draft_deg"])
     run = lay["runner"]
     side = run["side"]
     gate = lay["ingate"]
@@ -86,8 +90,8 @@ def size(*, values: dict, casting_volume_mm3: float, n: int, z_top: float, z_bot
                    for b in branches]
         if side == "cope":
             sprue_len = cope_height - runners[0].d["height"]
-        sprue_bottom = Section.round(math.sqrt(4 * a_s / math.pi))
-        sprue_top = Section.round(math.sqrt(4 * hy.sprue_top_area(a_s, basin, sprue_len) / math.pi))
+        sprue_top = Section.round(math.sqrt(4 * a_s / math.pi))
+        sprue_bottom = Section.round(sprue_top.d["d"] + 2 * sprue_len * math.tan(math.radians(draft)))
         ingate = Section.rectangle(a_i / n / t_i, t_i)
         sizes = {"sprue_bottom": sprue_bottom, "sprue_top": sprue_top, "sprue_length": sprue_len,
                  "runners": runners, "ingate": ingate}
@@ -109,7 +113,7 @@ def size(*, values: dict, casting_volume_mm3: float, n: int, z_top: float, z_bot
                    "gate_level_mm": z_gate, "casting_top_mm": z_top, "casting_bottom_mm": z_bottom,
                    "runner_branches": list(branches), "runner_side": side,
                    "runner_height_ratio": float(run["height_ratio"]), "runner_taper_pct": float(run["taper_pct"]),
-                   "ingate_thickness_mm": t_i},
+                   "ingate_thickness_mm": t_i, "draft_deg": draft},
         "castings_kg": W, "poured_kg": G, "yield_pct": 100 * W / G, "pour_time_s": t_pour,
         "head_mm": H, "casting_height_mm": C, "casting_above_gate_mm": P, "effective_head_mm": h_eff,
         "choke_mm2": choke, "sprue_area_mm2": a_s, "runner_area_mm2": a_r, "ingate_area_mm2": a_i,
@@ -117,7 +121,7 @@ def size(*, values: dict, casting_volume_mm3: float, n: int, z_top: float, z_bot
         "runner_levels": [{"branches": b, "section": section_dict(s)} for b, s in zip(branches, runners)],
         "ingate": section_dict(ingate),
         "flow_l_s": q * 1e3,
-        "velocity_m_s": {"sprue_bottom": hy.velocity(q, a_s),
+        "velocity_m_s": {"sprue_top": hy.velocity(q, a_s),
                          "runner": [hy.velocity(q / b, s.area) for b, s in zip(branches, runners)],
                          "ingate": hy.velocity(q / n, ingate.area)},
         "iterations": trail,

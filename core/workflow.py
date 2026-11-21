@@ -568,8 +568,10 @@ TAPER_PCT = (10.0, 20.0)            # the range the engineer gave for the runner
 
 
 def runner_widths(side: str, width: float, taper_pct: float) -> tuple[float, float]:
-    """(width at the parting plane, width away from it) for a runner whose bottom face is width wide
-    and whose top face is taper_pct narrower: the top is the narrower face in the cope and the drag."""
+    """(width at the parting plane, width away from it) for a runner width wide at the parting plane and
+    taper_pct narrower at its far face, in the cope and the drag alike: the pattern draws out at the
+    parting plane, so every gating face is widest there (the engineer, 2026-11-19; before that the
+    drag runner's narrow face was on the plane)."""
     if side not in ("drag", "cope"):
         raise WorkflowError("side is drag or cope")
     lo, hi = TAPER_PCT
@@ -577,8 +579,8 @@ def runner_widths(side: str, width: float, taper_pct: float) -> tuple[float, flo
         raise WorkflowError(f"the runner's taper is {lo:g}-{hi:g} %, not {taper_pct:g} %")
     if width <= 0:
         raise WorkflowError("type the runner's width")
-    top = width * (1 - taper_pct / 100.0)
-    return (top, width) if side == "drag" else (width, top)    # drag: the parting plane is its top
+    far = width * (1 - taper_pct / 100.0)
+    return width, far
 
 
 def _crossing(chain: list, outline: list, half: float = 0.0) -> tuple[int, np.ndarray, float] | None:

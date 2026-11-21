@@ -373,8 +373,11 @@ Architectural choices and why, newest last.  Foundry numbers are never decided h
       the 3D build and are left out). The runner area is the total at every level (the engineer's
       choice): 2 arms A_r/2, 4 branches A_r/4; no step-down along an arm. One ingate per cavity,
       A_i/N, recipe thickness, width = area / thickness. Runner trapezoid: height = ratio x bottom,
-      top = (1 - taper) x bottom (`core.workflow.runner_widths`). Sprue round: bottom = A_s, top by
-      continuity over the basin head (`sprue_top_area`).
+      the face away from the parting plane (1 - taper) x the face on it (`core.workflow.runner_widths`).
+      Sprue round: its narrow top = A_s, its bottom opened by the recipe's draft over its length (the
+      engineer, 2026-11-19: the pattern draws out at the parting plane, so the sprue is widest at its
+      bottom; it was sized by continuity, wider at the top, before, and the hand check above was on
+      that version).
     - **Routing**: the runner meets each ingate at its foot, the layout's runner offset out from the
       contact along the ingate's normal, at least clearance + half the runner's width (straight:
       wherever the ingate reaches the runner line, at least that far). straight = one line through the sprue square to every ingate, run on
@@ -388,7 +391,8 @@ Architectural choices and why, newest last.  Foundry numbers are never decided h
       or cope slab footprint) by the clearance; no runner crossing another except at its own
       junctions; ingates clear of other cavities; sprue (top diameter) clear of cavities by the sprue
       clearance; everything inside the flask less the wall clearance; Hausdorff of the system onto its
-      own symmetry images within 0.01 mm (outlines, densified, after closing and opening the union by
+      own symmetry images within 0.01 mm; ingates clear of other runners and of the sprue (with the
+      CAD module's 1 mm embed: a short leaf arm or a cavity on the sprue's line had put them there) (outlines, densified, after closing and opening the union by
       1e-4 mm: a union of abutting bands can keep a zero-width sliver on one side only, which a plain
       Hausdorff check read as 2 mm); areas on the ratio within 2 %; the resized ingate's bar
       modulus still below its zone's. Unroutable shapes (not square, not balanced, an H not of 4, a
@@ -428,3 +432,27 @@ Architectural choices and why, newest last.  Foundry numbers are never decided h
     its mirror lines for a mirror-symmetric part); a repeat is dropped and counted.
     Hand check (the test): the block 100 x 60 x 40 in a 1000 x 800 flask gives rows up to N = 14 along
     x and 12 along y (pitch 101 + 25 mm), exactly as counted by hand.
+65. **Layout generator Phase 5: assembly in the CAD module** (2026-11-19, `layouts/assemble.py`).
+    A routed layout becomes an ordinary design document built with the editor's own workflow patches,
+    so it opens in the editor: box (parting plane at the drag height = the job's z = 0), cavity 0 as the
+    part at pattern size (the module scales the file then places it, so the parting transform's
+    translation is scaled too) and the rest as rigid copies, sprue, one runner element per routed arm
+    (the first dropping from the sprue, the others branching off their parent's end), ingates from each
+    foot to its contact, then the cup and the well (added last so the runners' drops move onto the
+    well). Built on demand only: `assemble(job, layout)` writes `<job>.<layout>.gating.json` and
+    `.step` and records the checks in the job's `assemblies`: regeneration without errors; the fused
+    metal one solid, as valid as the part file; its volume = parts + gating less where they meet,
+    within 0.1 %; a STEP round trip within 0.1 %; every element at least the recipe's draft. On the
+    8-cube test all 15 routed layouts pass every check (about a second each). Mirrored cavities are
+    refused for now (the module copies a part by a rigid move only).
+    **Draft, the engineer's rule** (2026-11-19): patterns draw out at the parting plane, so every gating
+    face is widest there. The sprue is narrow at its top (which carries the ratio's area) and opens by
+    the draft to its bottom; drag runners are now wide on the plane (`core.workflow.runner_widths`
+    changed for the editor too; the old rule, narrow on the plane in both halves, had a test that is
+    rewritten); `draft_deg` params (default 0) added to the ingate (a trapezoid of the same area) and
+    the sprue well (narrowing downward); the cup stands on the cope and opens upward.
+    **CAD-module collision rule** (`core/collide.py`): path elements branching off one element at the
+    same point may overlap each other there (a T or H junction: no joint joins siblings), and the
+    sprue (and what stacks on it) may run down through the runners that drop from the well under it,
+    as the module's own sync builds it. The production design of 15145827 had shown that second
+    overlap as an error before.

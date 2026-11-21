@@ -28,7 +28,7 @@
     {"path": "gating_ratios.default", "why": "sprue : runner : ingate areas"},
     {"path": "layout.runner.side", "why": "runner in the drag or the cope"},
     {"path": "layout.runner.height_ratio", "why": "runner height / width at the parting plane"},
-    {"path": "layout.runner.taper_pct", "why": "runner top face narrower than its bottom (draft)"},
+    {"path": "layout.runner.taper_pct", "why": "runner face away from the parting plane narrower than the face on it (draft)"},
     {"path": "layout.runner.extension_mm", "why": "runner run-on past the last ingate"},
     {"path": "layout.sprue.basin_head_mm", "why": "metal height in the cup above the sprue top"},
     {"path": "layout.ingate.side", "why": "gate level for the head"},
@@ -36,7 +36,8 @@
     {"path": "layout.clearance.runner_cavity_mm", "why": "runner edge to cavity"},
     {"path": "layout.clearance.cavity_sprue_mm", "why": "sprue to cavity"},
     {"path": "layout.clearance.flask_wall_mm", "why": "runners inside the flask"},
-    {"path": "shrinkage_pct", "why": "cavities are the casting scaled up by it"}
+    {"path": "shrinkage_pct", "why": "cavities are the casting scaled up by it"},
+    {"path": "layout.draft_deg", "why": "the sprue opens toward the parting plane by it"}
   ],
   "metrics": [
     {"path": "density_kg_m3", "why": "poured weight"}

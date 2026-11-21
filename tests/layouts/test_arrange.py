@@ -69,19 +69,20 @@ def placed(job, ctx, lay):
 def test_row_counts_match_the_hand_count(block):
     """Rows of the block (scaled 101 x 60.6) along a straight runner, ingate in the middle of the long
     face: the pitch is 101 + 25 (cavity clearance), so a row of k spans 126 (k - 1) + 101.  Inside the
-    flask less its 30 mm wall: runner along x, 940 long -> k <= 7; runner along y, 740 -> k <= 6.  So
-    N = 1, 2, 4 ... 14 with the runner along x and 1, 2 ... 12 along y; turning the part 180 or 270
-    degrees gives the same layouts (a half-turn of the flask)."""
+    flask less its 30 mm wall: runner along x, 940 long -> k <= 7; along y, 740 -> k <= 6.  An odd k
+    puts the middle cavity on the sprue, its ingate starting under it: rejected.  So N = 2, 4, 8, 12
+    each way (c2), N = 1 beside the sprue (c1), and N = 2 mirrored across the runner (d1: the block is
+    mirror-symmetric); 6, 10 and 14 rejected for the sprue, 16 for the flask wall.  Turning the part
+    180 or 270 degrees gives the same layouts (a half-turn of the flask)."""
     job, ctx = block
     lays, rej = run(job, ctx, families=["row"], ingates=[gate(job)], n_min=None, n_max=None)
-    by_rot = {}
-    for lay in lays:
-        by_rot.setdefault(lay["rotation_deg"], []).append(lay["n"])
-    assert sorted(by_rot) == [0, 90]
-    assert sorted(by_rot[0]) == [1, 2, 4, 6, 8, 10, 12, 14]
-    assert sorted(by_rot[90]) == [1, 2, 4, 6, 8, 10, 12]
-    walls = sorted(r["params"]["n"] for r in rej if r["reasons"][0]["code"] == "flask.wall")
-    assert walls == [14, 16]                                    # the first row too long each way
+    got = sorted((lay["rotation_deg"], lay["symmetry"], lay["n"]) for lay in lays)
+    want = sorted([(r, "c1", 1) for r in (0, 90)] + [(r, "d1", 2) for r in (0, 90)] +
+                  [(r, "c2", n) for r in (0, 90) for n in (2, 4, 8, 12)])
+    assert got == want
+    why = sorted((r["params"]["rotation_deg"], r["params"]["n"], r["reasons"][0]["code"]) for r in rej)
+    assert why == sorted([(r, n, "ingate.clear_of_sprue") for r in (0, 90) for n in (6, 10, 14)] +
+                         [(r, 16, "flask.wall") for r in (0, 90)])
     pitches = [lay["arrangement"]["pitch_mm"] for lay in lays if lay["n"] >= 4]
     assert all(126.0 <= p <= 126.0 + 0.7 for p in pitches)       # + the search's conservative outline
     assert job.data["phases"]["layouts"]["counts"]["duplicates"] > 0
@@ -159,3 +160,4 @@ def test_deterministic(block):
     a, ra = run(job, ctx, families=["row"], ingates=[gate(job)], n_max=6, count_threshold=None)
     b, rb = run(job, ctx, families=["row"], ingates=[gate(job)], n_max=6, count_threshold=None)
     assert json.dumps([a, ra], sort_keys=True) == json.dumps([b, rb], sort_keys=True)
+
