@@ -9,3 +9,7 @@ parts/
 .DS_Store
 seed_runs/*/
 *.bak
+
+jobs/
+layouts_ui/node_modules/
+layouts_ui/dist/

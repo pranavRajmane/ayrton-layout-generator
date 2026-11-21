@@ -521,8 +521,10 @@ def arranger(job, ctx: rn.Context | None = None, field: dict | None = None) -> A
     return a
 
 
-def run(job, ctx: rn.Context | None = None, field: dict | None = None) -> tuple[list, list]:
-    """Phase 3 on a GatingJob: count, then place and check every combination."""
+def run(job, ctx: rn.Context | None = None, field: dict | None = None, progress=None) -> tuple[list, list]:
+    """Phase 3 on a GatingJob: count, then place and check every combination.  ``progress(dict)``, when
+    given, hears the count and then each layout as it is placed (accepted or rejected), for a UI to
+    stream them."""
     from layouts.job import JobError
 
     if job.part_changed():
@@ -535,6 +537,8 @@ def run(job, ctx: rn.Context | None = None, field: dict | None = None) -> tuple[
         heights = height_problems(d, arr.ctx)          # no layout can fit: nothing to count
         thr = d["inputs"]["limits"]["count_threshold"] or d["recipe"]["settings"]["layouts"]["count_threshold"]
         count, by = arr.count()
+        if progress:
+            progress({"counted": count, "by_family": by})
         if count > thr and not heights:
             raise CountExceeded(count, thr, by)
         layouts, rejected, seen, dupes, kept = [], [], set(), 0, []
@@ -551,6 +555,9 @@ def run(job, ctx: rn.Context | None = None, field: dict | None = None) -> tuple[
             else:
                 lay["id"] = f"l{len(layouts)}"
                 layouts.append(lay)
+            if progress:
+                progress({"placed": len(layouts), "rejected": len(rejected), "duplicates": dupes,
+                          "layout": lay if not prob else None})
         if heights:
             rejected.append({"id": "r0", "params": {"n": None, "why": "every layout"}, "reasons": heights})
         issues = [f"part mirror IoU x {arr.iou['x']:.4f}, y {arr.iou['y']:.4f}: "

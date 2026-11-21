@@ -490,7 +490,7 @@ def run(job, ctx: Context | None = None) -> tuple[list, list]:
             bad = [c for c in rec["validation"] if not c["passed"]]
             if bad:
                 rejected.append({"id": lay["id"], "params": lay, "reasons": [
-                    {"code": c["code"], "message": c.get("message") or f"{c['code']} failed",
+                    {"code": c["code"], "message": c.get("message") or _explain(c),
                      **({"value": c["value"]} if "value" in c else {}), **({"limit": c["limit"]} if "limit" in c else {})}
                     for c in bad]})
             else:
@@ -501,6 +501,28 @@ def run(job, ctx: Context | None = None) -> tuple[list, list]:
     job.finish("runners", out, rejected=rejected, runtime_s=round(time.perf_counter() - t0, 3),
                counts={"routed": len(out), "rejected": len(rejected)})
     return out, rejected
+
+
+_WHY = {
+    "runner.path_lengths": "the paths from the sprue to the ingates differ by {value} % (most allowed {limit} %): "
+                           "cavities further along the runner fill later",
+    "runner.symmetric": "the runner system does not map onto itself under the layout's symmetry ({value} mm off)",
+    "runner.no_crossing": "{value} runner arm(s) cross another",
+    "runner.inside_flask": "the runners or the sprue reach into the flask's {limit} mm wall clearance",
+    "ingate.clear_of_other_cavities": "{value} ingate(s) cross another cavity",
+    "ingate.clear_of_runners": "{value} ingate(s) cross a runner they do not leave",
+    "ingate.clear_of_sprue": "{value} ingate(s) start under the sprue",
+    "sprue.clear_of_cavities": "the sprue is {value} mm from a cavity (needs {limit})",
+    "gating.ratio": "the sections are {value} % off the gating ratio (most allowed {limit} %)",
+    "ingate.freezes_first": "the sized ingate (modulus {value} mm) would not freeze before its zone ({limit} mm)",
+}
+
+
+def _explain(c: dict) -> str:
+    t = _WHY.get(c["code"])
+    v = c.get("value")
+    v = round(v, 3) if isinstance(v, float) else v
+    return t.format(value=v, limit=c.get("limit")) if t else f"{c['code']} failed"
 
 
 def _reason(r: Reject) -> dict:

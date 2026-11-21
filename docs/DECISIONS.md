@@ -456,3 +456,31 @@ Architectural choices and why, newest last.  Foundry numbers are never decided h
     sprue (and what stacks on it) may run down through the runners that drop from the well under it,
     as the module's own sync builds it. The production design of 15145827 had shown that second
     overlap as an error before.
+67. **Layout generator Phases 6 and 7: the app** (2026-11-21, `layouts/server.py`, `layouts/metrics.py`,
+    `layouts/thumbs.py`, `layouts_ui/`). Its own server (port 8010) and its own React app (Vite, port
+    5174), with the editor's stack and versions, at the engineer's request: the editor's `api/` and
+    `ui/` are untouched. A job is a folder under `jobs/`. **Inputs** (Phase 6): a STEP upload (closed
+    solid checked, volume, weight when the recipe has a density), the parting plane from the editor's
+    own `core.fit.suggest` (widest section, largest flat face) or as in the file, alloy and process
+    (offered from `settings.json`), a recipe set (the foundry presets, or the test recipe marked as
+    invented), the flask, the sprue (free, or fixed by a click on the flask plan), optional N range,
+    families, part turns and riser keep-outs, and the recipe's layout values pre-filled; what the
+    engineer changes becomes a per-job override. Refused before running, with the reasons: not a closed
+    solid, a flask smaller than the part and its clearances, any recipe value a phase needs left blank.
+    **Runs** go through the phases not done or out of date in a background thread; the UI polls the
+    progress; Phase 3 reports its count and then each layout as it is placed (`arrange.run(progress=)`),
+    so the grid fills while it runs; over the count threshold the run stops and the UI offers to narrow
+    N or raise the threshold. **Part analysis**: the part coloured by local modulus (the thickness field
+    / 6 just inside each point; the display mesh is split to two voxels so a flat face is coloured
+    across), hot spots, the ingate candidates as cones (click to switch one off, then re-run from Phase
+    3), zones and candidates as tables, and face tagging by clicking the part. **Metrics** (new phase,
+    information only): poured weight, yield, runner length, the smallest gap in plan between a cavity
+    and anything not its own, path-length error. **Grid** (Phase 7): server-drawn SVG top views (one
+    colour per kind of element; each cavity and the sprue carry the numbers they were drawn from, so a
+    test reads them back against the layout), filters on N, family, runner, ingate and part turn, sort on
+    any metric, a shortlist kept per job, compare 2-4 side by side, only the rows in view drawn. The
+    rejected tab groups by reason and shows each rejected layout. The detail view builds the 3D model on
+    demand (Phase 5), shows it, lists every Phase 4 and Phase 5 check, downloads the STEP, and has a
+    disabled "Send to simulation". Tests: `tests/layouts/test_server.py` (upload, refusals, a full run,
+    every accepted layout once and the counts adding up, thumbnails against the layouts, the rejected
+    groups, shortlist, build and download, an ingate switched off making layouts stale).
