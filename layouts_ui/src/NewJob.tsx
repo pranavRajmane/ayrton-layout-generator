@@ -188,7 +188,8 @@ export default function NewJob({ onCreated }: { onCreated: (id: string) => void 
             <label key={s.id} className="check" style={{ display: "flex" }}>
               <input type="radio" checked={parting === s.id} onChange={() => setParting(s.id)} />
               <span>{s.label} <span className="muted small">· {fmt(s.below, 0)} mm below, {fmt(s.above, 0)} mm above
-                {s.undercut_mm2 !== undefined ? ` · undercut ${fmt(s.undercut_mm2, 0)} mm²` : ""}</span></span>
+                {s.undercut_mm2 !== undefined ? ` · undercut ${fmt(s.undercut_mm2, 0)} mm²` : ""}</span>
+                {s.below <= 0.01 && <span className="bad small"> · nothing below the plane: no room for drag ingates</span>}</span>
             </label>
           ))}
           {up && sug && (

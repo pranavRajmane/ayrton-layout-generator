@@ -167,9 +167,12 @@ async def upload(request: Request, name: str) -> dict:
            "bbox": [[bb.min.X, bb.min.Y, bb.min.Z], [bb.max.X, bb.max.Y, bb.max.Z]], "suggestions": []}
     if ok:
         lo, hi = out["bbox"]
-        out["suggestions"] = fit.suggest(shape) + [{
+        sug = fit.suggest(shape) + [{
             "id": "as_is", "label": "As in the file (its z = 0 is the parting plane)", "move": np.eye(4).tolist(),
             "bbox": out["bbox"], "size": [h - l for l, h in zip(lo, hi)], "below": max(-lo[2], 0.0), "above": max(hi[2], 0.0)}]
+        # first the ones that leave metal below the plane (drag ingates need it), through the part before
+        # all in the drag; the editor's own order otherwise
+        out["suggestions"] = sorted(sug, key=lambda x: (x["below"] <= 1e-6, x["above"] <= 1e-6))
     (folder / "info.json").write_text(json.dumps(out))
     return out
 
@@ -200,6 +203,17 @@ def _problems(job_data: dict, shape_bbox, closed: bool) -> list[str]:
     for step, keys in miss.items():
         out.append(f"the recipe lacks for {step}: " + ", ".join(k["path"] for k in keys))
     if not miss:
+        # the ingates sit on the parting plane in the drag (or the cope): the part must reach into that half
+        side = v["layout"]["ingate"]["side"]
+        t_i = float(v["layout"]["ingate"]["thickness_mm"])
+        lo_z, hi_z = float(shape_bbox[0][2]), float(shape_bbox[1][2])
+        if side == "drag" and lo_z > -t_i / 2:
+            out.append(f"the part reaches only {max(-lo_z, 0.0) + 0.0:.1f} mm below the parting plane, and the ingates run "
+                       f"{t_i:g} mm deep in the drag: pick a parting plane through the part (or with the part in the "
+                       "drag), or set the ingate side to cope")
+        if side == "cope" and hi_z < t_i / 2:
+            out.append(f"the part reaches only {max(hi_z, 0.0) + 0.0:.1f} mm above the parting plane, and the ingates run "
+                       f"{t_i:g} mm high in the cope: pick a parting plane through the part, or set the ingate side to drag")
         s = 1 + float(v["shrinkage_pct"]) / 100
         lo, hi = (np.asarray(x, float) * s for x in shape_bbox)
         cl = v["layout"]["clearance"]

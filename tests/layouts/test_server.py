@@ -74,6 +74,14 @@ def test_bad_inputs_are_refused_with_reasons(client, upload):
     assert r.status_code == 422 and any("in length" in p for p in r.json()["detail"]["problems"])
     r = client.post("/api/layouts/jobs", json=spec(upload, alloy="steel"))
     assert r.status_code == 422
+    # parted at its bottom face: nothing in the drag for the ingates
+    on_top = spec(upload, parting={"move": next(x for x in upload["suggestions"] if x["below"] <= 1e-6)["move"]})
+    r = client.post("/api/layouts/jobs", json=on_top)
+    assert r.status_code == 422 and any("below the parting plane" in p for p in r.json()["detail"]["problems"])
+
+
+def test_the_first_parting_choice_leaves_metal_in_the_drag(upload):
+    assert upload["suggestions"][0]["below"] > 0
 
 
 def test_a_run_goes_through_every_phase(client, done):

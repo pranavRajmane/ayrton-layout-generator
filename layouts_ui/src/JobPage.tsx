@@ -31,6 +31,19 @@ function RunTab({ job, prog, onRun, onNarrow }: {
           <span className="muted">{p.running ? p.message : ""}</span>
         </div>
         {p.error && !p.count_exceeded && <div className="error">{p.error}</div>}
+        {!p.running && (() => {
+          // a phase that finished with nothing: say why, plainly, rather than leave an empty grid
+          const c = (ph: string) => phases[ph]?.counts ?? {};
+          const why = (ph: string) => (phases[ph]?.issues ?? []).join(" ");
+          if (status.ingate_candidates === "done" && c("ingate_candidates").candidates === 0)
+            return <div className="error">No ingate candidates, so no layouts. {why("ingate_candidates")}
+              {" "}Most often the parting plane leaves no metal where the ingates go: make a new job with a parting plane through the part.</div>;
+          if (status.layouts === "done" && c("layouts").layouts === 0)
+            return <div className="error">No layout fits. See the Rejected tab for the reasons{c("layouts").combinations === 0 ? " (no combination was tried: check the limits)" : ""}.</div>;
+          if (status.runners === "done" && c("runners").routed === 0)
+            return <div className="error">Layouts were placed but none could be routed: see the Rejected tab.</div>;
+          return null;
+        })()}
         {p.count_exceeded && (
           <div className="note">
             <b>{p.count_exceeded.count}</b> layout combinations counted, over the threshold of {p.count_exceeded.threshold}
