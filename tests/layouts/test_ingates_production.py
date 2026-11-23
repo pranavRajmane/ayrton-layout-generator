@@ -37,6 +37,7 @@ def production():
 
 
 @pytest.mark.slow
+@pytest.mark.skipif(not (PART.exists() and DESIGN.exists()), reason="the production part is not in the repo (parts/ holds customer CAD)")
 def test_production_ingates_are_among_the_candidates(tmp_path):
     tr, lines = production()
     size = next(iter(lines.values()))[2]
